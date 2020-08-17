@@ -18,7 +18,7 @@ Currently we have BG1 assets extracted and upscaled to 2k.  4k coming soon.  Gem
 [![cut-scene-sword-coast.png](https://i.postimg.cc/hPtk2vyB/cut-scene-sword-coast.png)](https://postimg.cc/kDLY4JP1)
 
 ### Work Speed
-One of the reasons we this has been a little slower than I would like is we don't have enough tools to help with fast conversions of many assets at once.  Work is being done to NearInfinity to allow mass conversion.
+One of the reasons this has been a little slower than I would like is we don't have enough tools to help with fast conversions of many assets at once.  Work is being done to NearInfinity to allow mass conversion.
 
 ### Near Infinity Video
 [![Near Infinity Demo](https://img.youtube.com/vi/jd3RItOyFxU/0.jpg)](https://www.youtube.com/watch?v=jd3RItOyFxU&feature=youtu.be)
