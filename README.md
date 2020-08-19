@@ -31,10 +31,13 @@ Currently we have BG1 assets extracted and upscaled to 2k.  4k coming soon.  Gem
 [![cut-scene-sword-coast.png](https://i.postimg.cc/hPtk2vyB/cut-scene-sword-coast.png)](https://postimg.cc/kDLY4JP1)
 
 ### Video Comparison
+#### Original
 [![Original BG Intro](https://img.youtube.com/vi/MpiKW6AMeEI/0.jpg)](https://www.youtube.com/watch?v=MpiKW6AMeEI&feature=youtu.be)
 
+#### 2k
 [![Original BG Intro 2k](https://img.youtube.com/vi/xeNiJnpFKbw/0.jpg)](https://www.youtube.com/watch?v=xeNiJnpFKbw&feature=youtu.be)
 
+#### 4k
 [![Original BG Intro 4k](https://img.youtube.com/vi/GF_aN3QOCIo/0.jpg)](https://www.youtube.com/watch?v=GF_aN3QOCIo&feature=youtu.be)
 
 
