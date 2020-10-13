@@ -10,14 +10,14 @@ Currently we have BG1 assets extracted and upscaled to 2k.  4k coming soon.  Gem
     Upscale assets
       - Focus on Interface MOS/BAM
     Mass Convert - Near Infinity
-      - MOS 90% - This is working, but has small interface related bugs.
-      - BAM 0% - This needs to have a "transference" function added along with Mass Convert feature.
+      - MOS 98% - This is working, but has small interface related bugs.
+      - BAM 50% - This needs to have a "transference" function added along with Mass Convert feature.
       - TIS 0% - To be determined.
     Modify - GemRB
-      - Add Setting Option "UpscaleFactor"
-      - Modify Interface Files to use UpscaleFactor or Alternative
-      - Modify Interface Related Importers to add UpscaleFactor or Alternative
-      - Add Zoom In/Out
+      - 70% - Add Setting Option "UpscaleFactor"
+      - 80% - Modify Interface Files to use UpscaleFactor or Alternative
+      - 80% - Modify Interface Related Importers to add UpscaleFactor or Alternative
+      - 0% - Add Zoom In/Out
 
 ### 2k Screenshots
 [![Untitled.png](https://i.postimg.cc/d3rsvxPk/Untitled.png)](https://postimg.cc/2LjR7T5r)
