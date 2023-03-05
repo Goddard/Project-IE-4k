@@ -4,7 +4,7 @@
 The purpose of this project is to have native 2k/4k playable IE game assets and an engine capable of playing at those resolutions.  
 
 ## Community
-You can join our discord community at - https://discord.gg/9V8N4sey
+You can join our discord community at - https://discord.gg/Pr7wapQ5H6
 
 ## Current Status
 Currently we have BG1 assets extracted and upscaled to 2k.  4k coming soon.  GemRB is the current target and it is working perfectly with a few simple changes to allow the interface to scale.
