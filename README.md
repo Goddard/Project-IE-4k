@@ -20,7 +20,7 @@ Everything in the project focuses on allowing you to upscale your game assets.  
  - MacOS NOT SUPPORTED - I don't have a mac.  I don't think it would take too much to get it working, but I just haven't tested yet.
 
 ### Hardware Support
-GPU - Nvidia is currently the only supported GPU.  Other GPUs will be supported soon.  I tested on a 4090 with 24 GB of VRAM, but it should still work if you have less VRAM available it will just take longer.
+GPU - Nvidia, AMD, and Intel should work. I personally only have an Nvidia GPU so I haven't tested the others.  Please report issues if it isn't using your GPU when doing GPU operations(e.g. upscale). I tested on a 4090 with 24 GB of VRAM, but it should still work if you have less VRAM available it will just take longer.
 
 CPU - More cores more speed, but any CPU should still funciton.  The tasks the project does requires ample CPU power though.  I don't recommend trying to perform pie4k operations on a system without a GPU, but it is technically still possible, but it will probably take several days to complete if not weeks.
 
@@ -36,7 +36,12 @@ When you build this project you are really building 3 projects currently.  We ob
 ### Linux
 Whatever package manager you use, you will need gcc, cmake, git, libvorbis, sdl2, sdl2_mixer, sdl2_image, gtest, libvlc, vulkan headers, ninja 
 
-If you have an Nvidia GPU you will need cuda with nvml.
+Nvidia - libnvidia-ml-dev (ubuntu)
+AMD - nothing extra at this time
+Intel - intel-level-zero-gpu level-zero
+
+
+If you have an Nvidia GPU you will need cuda with nvml.  AMD should work without intstalling extra packages, but we may use amdsmi in the future. Intel should work with intel level zero library.
 
 `./compile.sh`
 
@@ -61,7 +66,7 @@ I use msys2 to build on Windows.  You should use mingw-w64 and install these pac
   mingw-w64-x86_64-vulkan-headers \
   ninja`
 
-You also need to have cuda installed if you have an Nvidia GPU.  Support for other GPUs are coming soon.
+You also need to have cuda installed if you have an Nvidia GPU.  If you have an AMD GPU you will need AMD ADLX.  Intel users can use Intel Level Zero.
 
 `./compile.sh`
 

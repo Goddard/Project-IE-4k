@@ -2,6 +2,7 @@
 #include "core/OperationsMonitor/NvmlGpuProvider.h"
 #include "core/OperationsMonitor/AmdSysfsGpuProvider.h"
 #include "core/OperationsMonitor/IntelL0GpuProvider.h"
+#include "core/OperationsMonitor/WindowsDxgiGpuProvider.h"
 #include "core/Logging/Logging.h"
 
 namespace ProjectIE4k {
@@ -23,6 +24,15 @@ std::unique_ptr<GpuProvider> GpuProviderFactory::create() {
         Log(DEBUG, "ResourceMonitor", "GpuProviderFactory selected Intel Level Zero provider");
         return intel;
     }
+#ifdef _WIN32
+    {
+        auto dxgi = std::make_unique<WindowsDxgiGpuProvider>();
+        if (dxgi->initialize() && dxgi->isAvailable()) {
+            Log(DEBUG, "ResourceMonitor", "GpuProviderFactory selected DXGI provider (Windows)");
+            return dxgi;
+        }
+    }
+#endif
     Log(DEBUG, "ResourceMonitor", "GpuProviderFactory: no provider available, falling back to none");
     return nullptr;
 }
