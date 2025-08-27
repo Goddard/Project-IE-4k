@@ -5,7 +5,6 @@
 #include <iostream>
 #include <algorithm>
 #include <zlib.h>
-#include <set>
 
 #include "core/SClassID.h"
 #include "core/Logging/Logging.h"
@@ -263,49 +262,18 @@ bool BAM::convertBamToPng() {
         Log(DEBUG, "BAM", "Extracting BAM V1: {} frames, {} cycles", 
             bamV1File.frameEntries.size(), bamV1File.cycleEntries.size());
         
-        // Extract unique frames only, then create cycle-frame mapping
-        std::set<uint16_t> extractedFrames;
-        std::map<std::pair<size_t, size_t>, uint16_t> cycleFrameToActualFrame; // (cycle, frameInCycle) -> actualFrameIndex
-        
-        // First pass: identify all unique frames and create mapping
-        for (size_t cycleIndex = 0; cycleIndex < bamV1File.cycleEntries.size(); cycleIndex++) {
-            const auto& cycle = bamV1File.cycleEntries[cycleIndex];
-            
-            for (size_t frameInCycle = 0; frameInCycle < cycle.frameCount; frameInCycle++) {
-                // Use Frame Lookup Table to get the actual frame index
-                size_t fltIndex = cycle.firstFrame + frameInCycle;
-                if (fltIndex >= bamV1File.frameLookupTable.size()) {
-                    Log(DEBUG, "BAM", "FLT index {} out of bounds for cycle {}", fltIndex, cycleIndex);
-                    continue;
-                }
-                
-                uint16_t actualFrameIndex = bamV1File.frameLookupTable[fltIndex];
-                if (actualFrameIndex >= bamV1File.frameEntries.size()) {
-                    Log(DEBUG, "BAM", "Frame index {} out of bounds for cycle {}", actualFrameIndex, cycleIndex);
-                    continue;
-                }
-                
-                // Store the mapping
-                cycleFrameToActualFrame[std::make_pair(cycleIndex, frameInCycle)] = actualFrameIndex;
-                extractedFrames.insert(actualFrameIndex);
-            }
-        }
-
-        Log(DEBUG, "BAM", "Found {} unique frames out of {} total cycle-frame combinations", 
-            extractedFrames.size(), cycleFrameToActualFrame.size());
-
-        // Second pass: extract unique frames only
-        for (uint16_t frameIndex : extractedFrames) {
+        // Extract every frame index exactly once, independent of cycles
+        for (uint16_t frameIndex = 0; frameIndex < bamV1File.frameEntries.size(); ++frameIndex) {
             const auto& frameEntry = bamV1File.frameEntries[frameIndex];
-            
+
             // Create frame filename with frame index: frame_X.png
             std::string frameFilename = extractPath + "/frame_" + std::to_string(frameIndex) + ".png";
-            
+
             // Extract frame data and convert to PNG
             if (!extractBAMV1Frame(frameEntry, frameFilename)) {
-              Log(ERROR, "BAM", "Failed to extract frame {} for {} type {}",
-                  frameIndex, resourceName_, getPluginName());
-              continue;
+                Log(ERROR, "BAM", "Failed to extract frame {} for {} type {}",
+                    frameIndex, resourceName_, getPluginName());
+                continue;
             }
         }
         
@@ -314,32 +282,17 @@ bool BAM::convertBamToPng() {
         Log(DEBUG, "BAM", "Extracting BAM V2: {} frames, {} cycles, {} data blocks", 
             bamV2File.frameEntries.size(), bamV2File.cycleEntries.size(), bamV2File.dataBlocks.size());
 
-        // Extract frames with cycle information in filenames
-        for (size_t cycleIndex = 0; cycleIndex < bamV2File.cycleEntries.size(); cycleIndex++) {
-            const auto& cycle = bamV2File.cycleEntries[cycleIndex];
+        // Extract every frame index exactly once, independent of cycles
+        for (size_t frameIndex = 0; frameIndex < bamV2File.frameEntries.size(); ++frameIndex) {
+            const auto &frameEntry = bamV2File.frameEntries[frameIndex];
 
-            for (size_t frameInCycle = 0; frameInCycle < cycle.frameCount;
-                 frameInCycle++) {
-              size_t frameIndex = cycle.firstFrame + frameInCycle;
-              if (frameIndex >= bamV2File.frameEntries.size()) {
-                Log(DEBUG, "BAM", "Frame index {} out of bounds for cycle {}",
-                    frameIndex, cycleIndex);
+            // Create frame filename using absolute frame index for V2
+            std::string frameFilename = extractPath + "/frame_" + std::to_string(frameIndex) + ".png";
+
+            // Extract frame from PVRZ texture atlas
+            if (!extractBAMV2Frame(frameEntry, frameFilename)) {
+                Log(ERROR, "BAM", "Failed to extract frame {}", frameIndex);
                 continue;
-              }
-
-              const auto &frameEntry = bamV2File.frameEntries[frameIndex];
-
-              // Create frame filename using absolute frame index for V2
-              // frame_<absoluteIndex>.png
-              std::string frameFilename =
-                  extractPath + "/frame_" + std::to_string(frameIndex) + ".png";
-
-              // Extract frame from PVRZ texture atlas
-              if (!extractBAMV2Frame(frameEntry, frameFilename)) {
-                Log(ERROR, "BAM", "Failed to extract frame {} from cycle {}",
-                    frameIndex, cycleIndex);
-                continue;
-              }
             }
         }
     }
@@ -455,7 +408,7 @@ bool BAM::convertPngToBamV1() {
       if (pngIt == frameIndexToPng.end()) {
         Log(WARNING, "BAM", "No PNG file found for frame {}", frameIndex);
         // Create empty frame
-        BAMV1FrameEntry frameEntry;
+        BAMV1FrameEntry frameEntry = {};
         frameEntry.width = 1;
         frameEntry.height = 1;
         // Preserve original center coordinates (scaled) even for placeholder frames
@@ -467,7 +420,7 @@ bool BAM::convertPngToBamV1() {
           frameEntry.centerX = 0;
           frameEntry.centerY = 0;
         }
-        frameEntry.dataOffset = 0;
+        // dataOffset will be 0 due to {} initialization, let serialize() handle it
         frameEntries[frameIndex] = frameEntry;
         frameData[frameIndex] = std::vector<uint8_t>(1, compressedColor);
         continue;
@@ -486,7 +439,7 @@ bool BAM::convertPngToBamV1() {
 
 
       // Create frame entry with original center coordinates scaled by upscale factor
-      BAMV1FrameEntry frameEntry;
+      BAMV1FrameEntry frameEntry = {};
       frameEntry.width = static_cast<uint16_t>(width);
       frameEntry.height = static_cast<uint16_t>(height);
 
@@ -503,7 +456,7 @@ bool BAM::convertPngToBamV1() {
         return false;
       }
 
-      frameEntry.dataOffset = 0; // Will be set later
+      // dataOffset will be 0 due to {} initialization, let serialize() handle it
       frameEntries[frameIndex] = frameEntry;
 
       // Convert ARGB to palette indices
@@ -533,9 +486,9 @@ bool BAM::convertPngToBamV1() {
 
       if (compressedData.size() < framePixels.size()) {
         frameData[i] = compressedData;
-        frameEntries[i].dataOffset = 0; // RLE flag will be set in serialization
+        // Don't set dataOffset here - let serialize() handle it
       } else {
-        frameEntries[i].dataOffset = 0x80000000; // Uncompressed flag
+        // Don't set dataOffset here - let serialize() handle it
       }
     }
 
