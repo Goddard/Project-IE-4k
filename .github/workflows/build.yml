@@ -1,0 +1,111 @@
+name: Build PIE4K
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config git python3-dev \
+            libopencv-dev libsdl2-dev libsdl2-image-dev zlib1g-dev libpng-dev \
+            libvulkan-dev libgtest-dev
+
+      - name: Build and install GTest (Ubuntu)
+        run: |
+          sudo cmake -S /usr/src/googletest -B /usr/src/googletest/build
+          sudo cmake --build /usr/src/googletest/build --target install
+
+      - name: Cache ncnn
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/_deps/ncnn-src
+            build/_deps/ncnn-build
+            install/ncnn
+          key: ${{ runner.os }}-ncnn-20250503
+          restore-keys: |
+            ${{ runner.os }}-ncnn-
+
+      - name: Build
+        run: |
+          bash ./compile.sh
+          cmake --install build --prefix PIE4K-linux
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PIE4K-linux
+          path: PIE4K-linux/
+
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          cache: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-gtest
+            mingw-w64-x86_64-opencv
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_image
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-libpng
+            mingw-w64-x86_64-vulkan-headers
+            mingw-w64-x86_64-vulkan-loader
+            git
+
+      - name: Enable long paths for git
+        run: git config --global core.longpaths true
+
+      - name: Cache ncnn
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/_deps/ncnn-src
+            build/_deps/ncnn-build
+            install/ncnn
+          key: ${{ runner.os }}-ncnn-20250503
+          restore-keys: |
+            ${{ runner.os }}-ncnn-
+
+      - name: Build
+        run: |
+          ./compile.sh
+          cmake --install build --prefix PIE4K-windows
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PIE4K-windows
+          path: PIE4K-windows/
+
+

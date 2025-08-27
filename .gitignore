@@ -1,0 +1,44 @@
+.*
+!.gitignore
+!.gitmodules
+!.github
+
+# Non-dotfile patterns from your output
+
+## gemrb specific
+Cache2
+
+## ignore install dir
+install
+
+## build
+build
+
+## binary
+projectie4k
+pie4k
+
+## modules for now, may include later
+# models
+
+## exclude any game overrides
+*-overrideX*/
+
+## exclude any debug dump files
+scripts/debug/dumps
+
+## exclude pie4k log
+pie4k.log
+
+## exclude pie4k cache
+.pie4kcache
+
+## exclude profiles for now will include later
+performance_profiles.csv
+
+## exclude output directory
+output/
+
+## exclude testing data
+Testing
+tests
