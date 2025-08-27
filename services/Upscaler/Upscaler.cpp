@@ -10,7 +10,7 @@ namespace ProjectIE4k {
 namespace {
 class PerExtractorVkAllocators {
 public:
-  explicit PerExtractorVkAllocators(int gpuIndex = 0)
+  explicit PerExtractorVkAllocators(int gpuIndex = ncnn::get_default_gpu_index())
       : blobVkAllocator_(ncnn::get_gpu_device(gpuIndex)),
         stagingVkAllocator_(ncnn::get_gpu_device(gpuIndex)) {}
 
@@ -29,9 +29,9 @@ private:
 };
 } // namespace
 
-Upscaler::Upscaler(const cv::Mat &imageData, ncnn::Net *model, int tileSize)
+Upscaler::Upscaler(const cv::Mat &imageData, ncnn::Net *model, int tileSize, int gpuIndex)
     : imageData_(imageData.clone()), model_(model), tileSize_(tileSize),
-      overlap_(32) {
+      overlap_(32), gpuIndex_(gpuIndex) {
   Log(DEBUG, "Upscaler",
       "Upscaler created with image data: {}x{}, scale: {}x, tileSize: {}, "
       "overlap: {}",
@@ -93,7 +93,7 @@ cv::Mat Upscaler::upscale() {
 
     for (size_t i = 0; i < tileRegions.size(); ++i) {
       const auto &region = tileRegions[i];
-      Log(DEBUG, "UpscalerService", "Processing tile {}/{}: ({},{}) {}x{}",
+      Log(DEBUG, "UpscalerService", "Processing tile {}/{}: ({},{} ) {}x{}",
           i + 1, tileRegions.size(), region.x, region.y, region.width,
           region.height);
 
@@ -157,7 +157,7 @@ cv::Mat Upscaler::upscale() {
   ncnn::Extractor extractor = model_->create_extractor();
   extractor.set_blob_allocator(&blob_allocator);
   extractor.set_workspace_allocator(&workspace_allocator);
-  PerExtractorVkAllocators vkAllocsDirect(0);
+  PerExtractorVkAllocators vkAllocsDirect; // uses default GPU index
   extractor.set_blob_vkallocator(vkAllocsDirect.blobVk());
   extractor.set_staging_vkallocator(vkAllocsDirect.stagingVk());
   ncnn::Mat ncnnOutput;

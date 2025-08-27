@@ -82,6 +82,29 @@ void CFG::initialize(const std::string& configFile) {
     
     auto maxVRAMStr = config.get("MaxVRAM", "90");
     MaxVRAM = std::stod(maxVRAMStr);
+
+    // Read usable GPU IDs as a comma-separated list (e.g., "0,1,2")
+    UsableGPUIDs.clear();
+    auto usableGpuStr = config.get("UsableGPUIDs", "");
+    if (!usableGpuStr.empty()) {
+        auto parts = splitCommaSeparated(usableGpuStr);
+        for (const auto &p : parts) {
+            try {
+                int id = std::stoi(p);
+                if (id >= 0) {
+                    UsableGPUIDs.push_back(id);
+                } else {
+                    Log(WARNING, "Config", "Ignoring negative GPU id '{}' in UsableGPUIDs", p);
+                }
+            } catch (...) {
+                Log(WARNING, "Config", "Invalid GPU id '{}' in UsableGPUIDs; skipping", p);
+            }
+        }
+        Log(DEBUG, "Config", "Loaded {} usable GPU id(s) from config", UsableGPUIDs.size());
+    } else {
+        UsableGPUIDs.push_back(0);
+        Log(DEBUG, "Config", "UsableGPUIDs not specified; defaulting to [0]");
+    }
     
     // Read known bad resources list and split into vector
     auto resourceKnownBadStr = config.get("ResourceKnownBad", "");

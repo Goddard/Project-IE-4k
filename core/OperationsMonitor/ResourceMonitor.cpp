@@ -1,5 +1,6 @@
 #include "ResourceMonitor.h"
 #include "core/Logging/Logging.h"
+#include "core/OperationsMonitor/GpuProviderFactory.h"
 #include "core/CFG.h"
 #include <algorithm>
 #include <fstream>
@@ -7,124 +8,11 @@
 #include <filesystem>
 
 #ifdef __linux__
-    #include <sys/sysinfo.h>
-    #include <sys/stat.h>
-    #include <sys/sysmacros.h>
-    #include <unistd.h>
-#endif
-
-#ifdef _WIN32
-    #include <windows.h>
-#else
-    #include <dlfcn.h>
 #endif
 
 namespace ProjectIE4k {
 
-namespace {
-// Minimal NVML API shims for runtime dynamic loading
-// We avoid requiring nvml.h at build time and do not link against NVML.
-
-// Basic NVML status success code
-constexpr int NVML_SUCCESS_CODE = 0;
-
-// Mirror essential NVML structs and opaque handle
-using nvmlDevice_t_dyn = void*;
-struct nvmlUtilization_t_dyn { unsigned int gpu; unsigned int memory; };
-struct nvmlMemory_t_dyn { unsigned long long total; unsigned long long free; unsigned long long used; };
-
-// Function pointer types
-using PFN_nvmlInit = int (*)();
-using PFN_nvmlShutdown = int (*)();
-using PFN_nvmlErrorString = const char* (*)(int);
-using PFN_nvmlDeviceGetHandleByIndex = int (*)(unsigned int, nvmlDevice_t_dyn*);
-using PFN_nvmlDeviceGetUtilizationRates = int (*)(nvmlDevice_t_dyn, nvmlUtilization_t_dyn*);
-using PFN_nvmlDeviceGetMemoryInfo = int (*)(nvmlDevice_t_dyn, nvmlMemory_t_dyn*);
-
-struct NVMLApi {
-    bool initialized = false;
-    bool available = false;
-    nvmlDevice_t_dyn device = nullptr;
-
-#ifdef _WIN32
-    HMODULE lib = nullptr;
-#else
-    void* lib = nullptr;
-#endif
-
-    PFN_nvmlInit nvmlInit = nullptr;           // try _v2 first then fallback
-    PFN_nvmlShutdown nvmlShutdown = nullptr;
-    PFN_nvmlErrorString nvmlErrorString = nullptr;
-    PFN_nvmlDeviceGetHandleByIndex nvmlDeviceGetHandleByIndex = nullptr;
-    PFN_nvmlDeviceGetUtilizationRates nvmlDeviceGetUtilizationRates = nullptr;
-    PFN_nvmlDeviceGetMemoryInfo nvmlDeviceGetMemoryInfo = nullptr;
-
-    const char* err(int code) const {
-        return nvmlErrorString ? nvmlErrorString(code) : "NVML error";
-    }
-};
-
-NVMLApi& getNVML() {
-    static NVMLApi api;
-    if (api.initialized) return api;
-    api.initialized = true;
-
-    // Load library
-#ifdef _WIN32
-    const char* candidates[] = { "nvml.dll" };
-    for (auto name : candidates) {
-        api.lib = LoadLibraryA(name);
-        if (api.lib) break;
-    }
-    auto loadSym = [&](const char* sym) -> FARPROC { return api.lib ? GetProcAddress(api.lib, sym) : nullptr; };
-#else
-    const char* candidates[] = { "libnvidia-ml.so.1", "libnvidia-ml.so" };
-    for (auto name : candidates) {
-        api.lib = dlopen(name, RTLD_LAZY | RTLD_LOCAL);
-        if (api.lib) break;
-    }
-    auto loadSym = [&](const char* sym) -> void* { return api.lib ? dlsym(api.lib, sym) : nullptr; };
-#endif
-
-    if (!api.lib) {
-        return api; // unavailable
-    }
-
-    // Resolve functions (init v2 or init)
-#ifdef _WIN32
-    api.nvmlInit = reinterpret_cast<PFN_nvmlInit>(loadSym("nvmlInit_v2"));
-    if (!api.nvmlInit) api.nvmlInit = reinterpret_cast<PFN_nvmlInit>(loadSym("nvmlInit"));
-    api.nvmlShutdown = reinterpret_cast<PFN_nvmlShutdown>(loadSym("nvmlShutdown"));
-    api.nvmlErrorString = reinterpret_cast<PFN_nvmlErrorString>(loadSym("nvmlErrorString"));
-    api.nvmlDeviceGetHandleByIndex = reinterpret_cast<PFN_nvmlDeviceGetHandleByIndex>(loadSym("nvmlDeviceGetHandleByIndex"));
-    api.nvmlDeviceGetUtilizationRates = reinterpret_cast<PFN_nvmlDeviceGetUtilizationRates>(loadSym("nvmlDeviceGetUtilizationRates"));
-    api.nvmlDeviceGetMemoryInfo = reinterpret_cast<PFN_nvmlDeviceGetMemoryInfo>(loadSym("nvmlDeviceGetMemoryInfo"));
-#else
-    api.nvmlInit = reinterpret_cast<PFN_nvmlInit>(loadSym("nvmlInit_v2"));
-    if (!api.nvmlInit) api.nvmlInit = reinterpret_cast<PFN_nvmlInit>(loadSym("nvmlInit"));
-    api.nvmlShutdown = reinterpret_cast<PFN_nvmlShutdown>(loadSym("nvmlShutdown"));
-    api.nvmlErrorString = reinterpret_cast<PFN_nvmlErrorString>(loadSym("nvmlErrorString"));
-    api.nvmlDeviceGetHandleByIndex = reinterpret_cast<PFN_nvmlDeviceGetHandleByIndex>(loadSym("nvmlDeviceGetHandleByIndex"));
-    api.nvmlDeviceGetUtilizationRates = reinterpret_cast<PFN_nvmlDeviceGetUtilizationRates>(loadSym("nvmlDeviceGetUtilizationRates"));
-    api.nvmlDeviceGetMemoryInfo = reinterpret_cast<PFN_nvmlDeviceGetMemoryInfo>(loadSym("nvmlDeviceGetMemoryInfo"));
-#endif
-
-    if (!api.nvmlInit || !api.nvmlDeviceGetHandleByIndex ||
-        !api.nvmlDeviceGetUtilizationRates || !api.nvmlDeviceGetMemoryInfo) {
-        return api; // missing symbols
-    }
-
-    // Initialize and get primary device 0
-    int r = api.nvmlInit();
-    if (r != NVML_SUCCESS_CODE) {
-        return api;
-    }
-    if (api.nvmlDeviceGetHandleByIndex(0, &api.device) == NVML_SUCCESS_CODE && api.device) {
-        api.available = true;
-    }
-    return api;
-}
-} // namespace
+ 
 
 ResourceMonitor::ResourceMonitor() {
     Log(DEBUG, "ResourceMonitor", "ResourceMonitor created");
@@ -139,6 +27,14 @@ void ResourceMonitor::initialize() {
     
     Log(MESSAGE, "ResourceMonitor", "Initializing ResourceMonitor");
     
+    // Initialize GPU provider
+    gpuProvider_ = GpuProviderFactory::create();
+    if (gpuProvider_) {
+        Log(DEBUG, "ResourceMonitor", "GPU provider initialized and available");
+    } else {
+        Log(DEBUG, "ResourceMonitor", "No GPU provider available; GPU metrics will be disabled");
+    }
+
     // Initialize metrics with default values
     currentMetrics_ = SystemMetrics{};
     previousMetrics_ = SystemMetrics{};
@@ -366,35 +262,30 @@ void ResourceMonitor::updateMemoryMetrics(SystemMetrics& metrics) {
 }
 
 void ResourceMonitor::updateGPUMetrics(SystemMetrics& metrics) {
-    // Try runtime NVML if available; gracefully degrade otherwise
-    NVMLApi& nvml = getNVML();
-    if (nvml.available && nvml.device) {
-        nvmlUtilization_t_dyn utilization{};
-        if (nvml.nvmlDeviceGetUtilizationRates(nvml.device, &utilization) == NVML_SUCCESS_CODE) {
-            metrics.gpuUsagePercent = static_cast<double>(utilization.gpu);
-        }
-
-        nvmlMemory_t_dyn memoryInfo{};
-        if (nvml.nvmlDeviceGetMemoryInfo(nvml.device, &memoryInfo) == NVML_SUCCESS_CODE) {
-            metrics.totalVRAM = memoryInfo.total;
-            metrics.usedVRAM = memoryInfo.used;
-            metrics.availableVRAM = memoryInfo.free;
-            if (memoryInfo.total > 0) {
-                metrics.vramUsagePercent = (static_cast<double>(memoryInfo.used) / static_cast<double>(memoryInfo.total)) * 100.0;
+    // Prefer provider if available
+    if (gpuProvider_ && gpuProvider_->isAvailable()) {
+        double gpuPercent = 0.0;
+        uint64_t total = 0, used = 0;
+        if (gpuProvider_->query(gpuPercent, total, used)) {
+            metrics.gpuUsagePercent = gpuPercent;
+            metrics.totalVRAM = total;
+            metrics.usedVRAM = used;
+            metrics.availableVRAM = (total > used) ? (total - used) : 0;
+            if (total > 0) {
+                metrics.vramUsagePercent = (static_cast<double>(used) / static_cast<double>(total)) * 100.0;
             }
+            if (verbose) {
+                Log(DEBUG, "ResourceMonitor", "GPU: {}% usage, VRAM: {:.1f}% ({:.1f}GB / {:.1f}GB)",
+                    static_cast<int>(metrics.gpuUsagePercent),
+                    metrics.vramUsagePercent,
+                    static_cast<double>(metrics.usedVRAM) / (1024.0 * 1024.0 * 1024.0),
+                    static_cast<double>(metrics.totalVRAM) / (1024.0 * 1024.0 * 1024.0));
+            }
+            return;
         }
-
-        if (verbose) {
-            Log(DEBUG, "ResourceMonitor", "GPU: {}% usage, VRAM: {:.1f}% ({:.1f}GB / {:.1f}GB)",
-                static_cast<int>(metrics.gpuUsagePercent),
-                metrics.vramUsagePercent,
-                static_cast<double>(metrics.usedVRAM) / (1024.0 * 1024.0 * 1024.0),
-                static_cast<double>(metrics.totalVRAM) / (1024.0 * 1024.0 * 1024.0));
-        }
-        return;
     }
 
-    // Fallback when NVML is unavailable
+    // Fallback when provider is unavailable or query failed
     metrics.gpuUsagePercent = 0.0;
     metrics.totalVRAM = 0;
     metrics.usedVRAM = 0;

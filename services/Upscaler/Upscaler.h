@@ -26,6 +26,7 @@ private:
   bool needsTiling_;
   int outputWidth_;
   int outputHeight_;
+  int gpuIndex_ = -1;
 
 public:
   /**
@@ -33,7 +34,7 @@ public:
    * @param imageData The image to operate on
    * @param model Pre-loaded NCNN model
    */
-  Upscaler(const cv::Mat &imageData, ncnn::Net *model, int tileSize);
+  Upscaler(const cv::Mat &imageData, ncnn::Net *model, int tileSize, int gpuIndex = -1);
 
   ~Upscaler();
 

@@ -5,8 +5,11 @@
 #include <functional>
 #include <mutex>
 #include <thread>
+#include <memory>
 
 namespace ProjectIE4k {
+
+class GpuProvider; // forward declaration
 
 /**
  * @brief System resource metrics
@@ -81,6 +84,9 @@ public:
     
 private:
   bool verbose = true;
+
+  // GPU provider
+  std::unique_ptr<GpuProvider> gpuProvider_;
 
   // Core metric collection
   void metricsUpdateLoop();

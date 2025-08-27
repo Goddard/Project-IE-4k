@@ -25,6 +25,7 @@ class CFG {
     std::string TISUpscalerModel;
     std::string PLTUpscalerModel;
     std::vector<std::string> ResourceKnownBad;
+    std::vector<int> UsableGPUIDs;
     double MaxCPU;
     double MaxRAM;
     double MaxGPU;

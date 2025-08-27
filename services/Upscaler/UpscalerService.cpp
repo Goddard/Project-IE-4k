@@ -16,6 +16,7 @@
 #include "core/OperationsMonitor/OperationsMonitor.h"
 #include "core/SClassID.h"
 #include "services/Upscaler/NcnnAllocator.h"
+#include <ncnn/gpu.h>
 
 namespace fs = std::filesystem;
 
@@ -327,6 +328,31 @@ bool UpscalerService::loadModel() {
 
   std::lock_guard<std::mutex> lock(modelMutex_);
 
+  // Initialize NCNN Vulkan GPU instance (capture NCNN device prints)
+  std::string vkInitOut = captureStderrOutput([&]() {
+    ncnn::create_gpu_instance();
+  });
+  if (!vkInitOut.empty()) {
+    Log(DEBUG, "UpscalerService", "Captured Vulkan init output: {}", vkInitOut);
+  }
+  int gpuCount = ncnn::get_gpu_count();
+  int selectedGpu = PIE4K_CFG.UsableGPUIDs[0];
+  if (gpuCount > 0) {
+    if (selectedGpu < 0 || selectedGpu >= gpuCount) {
+      Log(WARNING, "UpscalerService",
+          "Configured GPU index {} out of range [0,{}). Using 0.", selectedGpu,
+          gpuCount);
+      selectedGpu = 0;
+    }
+    // Some ncnn versions use set_default_gpu, others expose only per-Net set_vulkan_device
+    // We rely on per-Net set_vulkan_device below; keep default for allocators if available.
+    Log(MESSAGE, "UpscalerService", "Using NCNN Vulkan GPU index: {}",
+        selectedGpu);
+  } else {
+    Log(WARNING, "UpscalerService",
+        "NCNN reports 0 Vulkan GPUs. GPU model load may fall back to CPU.");
+  }
+
   // Clean up existing models
   sharedModel_.reset();
   cpuModel_.reset();
@@ -334,6 +360,14 @@ bool UpscalerService::loadModel() {
   // Try to load GPU model first (with Vulkan)
   auto gpuNet = std::make_unique<ncnn::Net>();
   gpuNet->opt.use_vulkan_compute = true;
+  // Set per-Net GPU device
+  {
+    int gpuIndex = PIE4K_CFG.UsableGPUIDs[0];
+    if (gpuIndex >= 0 && gpuIndex < ncnn::get_gpu_count()) {
+      gpuNet->set_vulkan_device(gpuIndex);
+      Log(DEBUG, "UpscalerService", "Assigned Net to Vulkan GPU index {}", gpuIndex);
+    }
+  }
   gpuNet->opt.num_threads =
       1; // Single thread per model instance since we have multiple threads
   gpuNet->opt.use_packing_layout = true; // Optimize memory access for GPU
@@ -516,7 +550,8 @@ bool UpscalerService::upscaleSingleImage(const std::string &inputPath,
       inputPath, inputImage.cols, inputImage.rows, inputImage.channels());
 
   // Create upscaler for this specific image
-  Upscaler upscaler(inputImage, getModel(), optimalSettings_.tileSize);
+  int activeGpu = PIE4K_CFG.UsableGPUIDs[0];
+  Upscaler upscaler(inputImage, getModel(), optimalSettings_.tileSize, activeGpu);
   // upscaler clones image
   inputImage.release();
 
