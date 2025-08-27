@@ -197,6 +197,12 @@ if(UNIX)
     target_link_libraries(pie4k PRIVATE dl)
 endif()
 
+# Link Windows system libraries when building with MSYS2/MinGW
+if(WIN32)
+    target_link_libraries(projectie4k_lib PRIVATE dxgi uuid)
+    target_link_libraries(pie4k PRIVATE dxgi uuid)
+endif()
+
 # Link required libraries
 target_link_libraries(pie4k PRIVATE ${ZLIB_LIBRARIES})
 target_link_libraries(projectie4k_lib PRIVATE ${ZLIB_LIBRARIES})
