@@ -105,7 +105,7 @@ You also need to have cuda installed if you have an Nvidia GPU.  If you have an 
 ## GemRB Zoom & UpScaleFactor modifications
 So Zoom is mostly functional along with UpScaleFactor, but some issues remain for both and fully playing the games without issue is likely not possible although it is close and if you are willing please test and report issues.
 
-[![Watch the video](https://img.youtube.com/vi/LD_rzlRIpE4/hqdefault.jpg)](https://www.youtube.com/watch?v=LD_rzlRIpE4)
+[![Watch the video](https://img.youtube.com/vi/LD_rzlRIpE4/hqdefault.jpg)](https://www.youtube.com/watch?v=JwuOLrcNN9c)
 
 ## Concepts
 I think the potential for this tool is eventually something like the concept art below.  In the future I imagine we will be able to create more detailed art work, or even a completely altered style for the whole game, for example an "anime" style like shown in some of the models below.  It all depends on what the user wants really.  Here is a human theif model concept for example that I personally would love to see in a more ultra realistic style.
