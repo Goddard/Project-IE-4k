@@ -3,6 +3,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 
 #include "core/Logging/Logging.h"
 #include "plugins/CommandRegistry.h"
@@ -11,9 +12,6 @@
 namespace fs = std::filesystem;
 
 namespace ProjectIE4k {
-
-// Auto-register the PLT plugin
-REGISTER_PLUGIN(PLT, IE_PLT_CLASS_ID);
 
 PLT::PLT(const std::string &resourceName_)
     : PluginBase(resourceName_, IE_PLT_CLASS_ID) {
@@ -44,8 +42,15 @@ bool PLT::extract() {
 bool PLT::assemble() {
   Log(MESSAGE, "PLT", "Starting PLT assembly for resource: {}", resourceName_);
 
-  // For now, simply re-serialize the in-memory pltFile (round-trip when paired
-  // with a PNG-to-PLT later)
+  // Convert from upscaled PNG - no fallback to original data
+  if (!convertPngToPlt()) {
+    Log(ERROR, "PLT", "Failed to convert upscaled PNG to PLT - no upscaled PNG found or conversion failed");
+    return false;
+  }
+
+  Log(DEBUG, "PLT", "Successfully converted upscaled PNG to PLT");
+
+  // Serialize the PLT data
   try {
     std::vector<uint8_t> data = pltFile.serialize();
     std::string outPath =
@@ -56,6 +61,7 @@ bool PLT::assemble() {
       return false;
     }
     out.write(reinterpret_cast<const char *>(data.data()), data.size());
+    Log(DEBUG, "PLT", "Successfully wrote assembled PLT file: {}", outPath);
     return true;
   } catch (const std::exception &e) {
     Log(ERROR, "PLT", "Serialize failed: {}", e.what());
@@ -132,10 +138,7 @@ void PLT::registerCommands(CommandTable &commandTable) {
                 std::cerr << "Usage: plt extract <resource_name>" << std::endl;
                 return 1;
               }
-              return ProjectIE4k::PluginManager::getInstance().extractResource(
-                         args[0], IE_PLT_CLASS_ID)
-                         ? 0
-                         : 1;
+              return PluginManager::getInstance().extractResource(args[0], IE_PLT_CLASS_ID) ? 0 : 1;
             }}},
           {"upscale",
            {"Upscale PLT png",
@@ -144,10 +147,7 @@ void PLT::registerCommands(CommandTable &commandTable) {
                 std::cerr << "Usage: plt upscale <resource_name>" << std::endl;
                 return 1;
               }
-              return ProjectIE4k::PluginManager::getInstance().upscaleResource(
-                         args[0], IE_PLT_CLASS_ID)
-                         ? 0
-                         : 1;
+              return PluginManager::getInstance().upscaleResource(args[0], IE_PLT_CLASS_ID) ? 0 : 1;
             }}},
           {"assemble",
            {"Assemble PLT from working data (e.g., plt assemble paperdoll)",
@@ -156,12 +156,112 @@ void PLT::registerCommands(CommandTable &commandTable) {
                 std::cerr << "Usage: plt assemble <resource_name>" << std::endl;
                 return 1;
               }
-              return ProjectIE4k::PluginManager::getInstance().assembleResource(
-                         args[0], IE_PLT_CLASS_ID)
-                         ? 0
-                         : 1;
+              return PluginManager::getInstance().assembleResource(args[0], IE_PLT_CLASS_ID) ? 0: 1;
             }}},
       }};
+}
+
+// Convert upscaled PNG back to PLT format
+bool PLT::convertPngToPlt() {
+  if (!valid_) {
+    Log(ERROR, "PLT", "PLT file not loaded or invalid");
+    return false;
+  }
+
+  // Check for upscaled PNG file
+  std::string pngPath = getUpscaledDir(false) + "/" + resourceName_ + ".png";
+  if (!fs::exists(pngPath)) {
+    Log(DEBUG, "PLT", "No upscaled PNG found at: {}", pngPath);
+    return false;
+  }
+
+  Log(DEBUG, "PLT", "Converting upscaled PNG to PLT: {}", pngPath);
+
+  // Load the upscaled PNG
+  std::vector<uint32_t> argb;
+  int width, height;
+  if (!loadPNG(pngPath, argb, width, height)) {
+    Log(ERROR, "PLT", "Failed to load upscaled PNG: {}", pngPath);
+    return false;
+  }
+
+  // Load MPAL256 palette
+  cv::Mat palBgr = cv::imdecode(colorPaletteData, cv::IMREAD_UNCHANGED);
+  if (palBgr.empty()) {
+    Log(ERROR, "PLT", "Failed to decode MPAL256 palette data");
+    return false;
+  }
+
+  const int palW = palBgr.cols;
+  const int palH = palBgr.rows;
+  if (palW < 1 || palH < 1) {
+    Log(ERROR, "PLT", "Invalid palette image dimensions");
+    return false;
+  }
+
+  // Get original PLT dimensions
+  const uint32_t originalWidth = pltFile.header.width;
+  const uint32_t originalHeight = pltFile.header.height;
+
+  if (originalWidth == 0 || originalHeight == 0) {
+    Log(ERROR, "PLT", "Invalid original dimensions: {}x{}", originalWidth, originalHeight);
+    return false;
+  }
+
+  // Calculate scaling factors
+  const float scaleX = static_cast<float>(width) / static_cast<float>(originalWidth);
+  const float scaleY = static_cast<float>(height) / static_cast<float>(originalHeight);
+
+  Log(DEBUG, "PLT", "Upscaling {}x{} to {}x{} (scale {:.2f}x{:.2f})",
+      originalWidth, originalHeight, width, height, scaleX, scaleY);
+
+  // Store original pixels before resizing
+  const auto originalPixels = pltFile.pixels;
+
+  // Update PLT dimensions to match upscaled PNG
+  pltFile.header.width = static_cast<uint32_t>(width);
+  pltFile.header.height = static_cast<uint32_t>(height);
+
+  // Resize pixels array
+  pltFile.pixels.resize(width * height);
+
+  // Perform nearest-neighbor upscaling of original PLT coordinates
+  // PLT stores pixels from bottom-to-top, so we need to handle this correctly
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      // Map upscaled coordinates back to original coordinates
+      const int origX = static_cast<int>(x / scaleX);
+      const int origY = static_cast<int>(y / scaleY);
+
+      // Clamp to original dimensions
+      const int clampedOrigX = std::min(origX, static_cast<int>(originalWidth) - 1);
+      const int clampedOrigY = std::min(origY, static_cast<int>(originalHeight) - 1);
+
+      // Get original pixel coordinates
+      // Original PLT stores bottom-to-top, so we need to flip Y when accessing
+      const size_t origPltIdx = static_cast<size_t>(originalHeight - 1 - clampedOrigY) *
+                               static_cast<size_t>(originalWidth) + static_cast<size_t>(clampedOrigX);
+
+      const PLTV1Pixel& origPixel = originalPixels[origPltIdx];
+
+      // Upscaled PLT also stores bottom-to-top, so flip Y coordinate
+      const size_t upscaledPltIdx = static_cast<size_t>(height - 1 - y) *
+                                   static_cast<size_t>(width) + static_cast<size_t>(x);
+
+      // Copy the original palette coordinates directly
+      pltFile.pixels[upscaledPltIdx] = origPixel;
+    }
+
+    // Progress logging for large images
+    if ((y + 1) % 100 == 0 || y == height - 1) {
+      Log(DEBUG, "PLT", "Processed {} of {} rows ({:.1f}%)", y + 1, height,
+          (y + 1) * 100.0 / height);
+    }
+  }
+
+  Log(DEBUG, "PLT", "Upscaled PLT from {}x{} to {}x{} using original palette coordinates",
+      originalWidth, originalHeight, width, height);
+  return true;
 }
 
 // Convert PLT palette-index pairs to RGBA via MPAL256.bmp and save as PNG
@@ -238,5 +338,7 @@ bool PLT::convertPltToPng() {
   Log(DEBUG, "PLT", "Saved PNG {}", outputPath);
   return true;
 }
+
+REGISTER_PLUGIN(PLT, IE_PLT_CLASS_ID);
 
 } // namespace ProjectIE4k
