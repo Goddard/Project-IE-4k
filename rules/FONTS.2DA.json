@@ -1,0 +1,5 @@
+{
+  "rules": [
+    { "operations": ["extract", "upscale", "assemble", "transfer"], "include": ["FONTS", "FONTS.2DA"], "exclude": [] }
+  ]
+}

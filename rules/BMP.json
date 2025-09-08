@@ -1,0 +1,5 @@
+{
+  "rules": [
+    { "operations": ["*"], "include": [], "exclude": ["MPAL256.BMP", "MPALETTE.BMP"] }
+  ]
+}

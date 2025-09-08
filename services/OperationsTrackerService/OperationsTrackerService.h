@@ -50,6 +50,10 @@ public:
                        const InputFingerprint& fp,
                        bool force = false);
 
+    // Phase-level API
+    bool shouldProcessPhase(const std::string& phase,
+                           const std::string& resourceType);
+
     void markStarted(const std::string& phase,
                      const std::string& resourceType,
                      const std::string& resourceName,
