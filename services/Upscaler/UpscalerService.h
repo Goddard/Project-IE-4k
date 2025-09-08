@@ -63,8 +63,6 @@ public:
     uint64_t baselineVRAM_;
     bool vramMeasured_;
 
-    // NCNN memory allocator for better memory management
-    std::unique_ptr<NcnnAllocator> ncnnAllocator_;
 
     struct ModelVramInfo {
       int loadMB;         // Model load VRAM

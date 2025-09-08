@@ -24,8 +24,7 @@ namespace ProjectIE4k {
 
 UpscalerService::UpscalerService()
     : currentResourceType_(0), modelVRAMUsage_(0), totalSystemVRAM_(0),
-      baselineVRAM_(0), vramMeasured_(false),
-      ncnnAllocator_(std::make_unique<NcnnAllocator>()) {}
+      baselineVRAM_(0), vramMeasured_(false) {}
 
 UpscalerService::~UpscalerService() {
     cleanup();
@@ -68,19 +67,7 @@ void UpscalerService::initializeForResourceType(SClass_ID resourceType) {
 }
 
 void UpscalerService::allocatorCleanup() {
-  if (ncnnAllocator_) {
-    Log(DEBUG, "UpscalerService",
-        "Using NcnnAllocator for memory cleanup (before: {} bytes, {} "
-        "allocations)",
-        ncnnAllocator_->getTotalAllocated(),
-        ncnnAllocator_->getAllocationCount());
-    ncnnAllocator_->forceCleanup();
-    ncnnAllocator_->waitForCleanup();
-    Log(DEBUG, "UpscalerService",
-        "NcnnAllocator cleanup complete (after: {} bytes, {} allocations)",
-        ncnnAllocator_->getTotalAllocated(),
-        ncnnAllocator_->getAllocationCount());
-  }
+  Log(DEBUG, "UpscalerService", "Using NCNN default allocators, no custom cleanup needed");
 }
 
 void UpscalerService::cleanup() {
@@ -290,13 +277,6 @@ UpscalerService::calculateVramUsage(std::string modelName, int imageWidth,
 }
 
 bool UpscalerService::loadModel() {
-  // Set up cleanup callback for memory tracking
-  if (ncnnAllocator_) {
-    ncnnAllocator_->setCleanupCallback([this](size_t freedBytes) {
-      Log(DEBUG, "UpscalerService", "NcnnAllocator freed {} bytes", freedBytes);
-    });
-  }
-
   // Get model name for current resource type
   std::string resourceExtension = SClass::getExtension(currentResourceType_);
   std::string modelName =
@@ -374,12 +354,6 @@ bool UpscalerService::loadModel() {
   gpuNet->opt.use_fp16_storage = true;   // Reduce memory footprint
   gpuNet->opt.use_fp16_arithmetic = true;
 
-  // Set the custom allocator for better memory management
-  if (ncnnAllocator_) {
-    gpuNet->opt.blob_allocator = ncnnAllocator_.get();
-    gpuNet->opt.workspace_allocator = ncnnAllocator_.get();
-  }
-
   Log(DEBUG, "UpscalerService", "Attempting to load GPU model with Vulkan");
 
   bool gpuLoadSuccess = false;
@@ -422,11 +396,6 @@ bool UpscalerService::loadModel() {
     cpuNet->opt.num_threads = 1;
     cpuNet->opt.lightmode = true;
 
-    // Set the custom allocator for CPU model as well
-    if (ncnnAllocator_) {
-      cpuNet->opt.blob_allocator = ncnnAllocator_.get();
-      cpuNet->opt.workspace_allocator = ncnnAllocator_.get();
-    }
 
     if (cpuNet->load_param((modelPath + ".param").c_str()) == 0 &&
         cpuNet->load_model((modelPath + ".bin").c_str()) == 0) {
@@ -456,14 +425,6 @@ bool UpscalerService::loadModel() {
 
   if (gpuLoadSuccess) {
     currentModelPath_ = modelPath;
-
-    // Log allocator memory usage
-    if (ncnnAllocator_) {
-      Log(DEBUG, "UpscalerService",
-          "NcnnAllocator memory after model load: {} bytes ({} allocations)",
-          ncnnAllocator_->getTotalAllocated(),
-          ncnnAllocator_->getAllocationCount());
-    }
 
     // Stop VRAM measurement and calculate model usage
     measureModelVRAMStop();
