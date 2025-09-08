@@ -1,1 +1,2 @@
+#!/bin/bash
 perf record -g -p $(pgrep projectie4k) -o perf_running.dat

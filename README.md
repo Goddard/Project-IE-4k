@@ -20,7 +20,7 @@ Everything in the project focuses on allowing you to upscale your game assets.  
  - MacOS NOT SUPPORTED - I don't have a mac.  I don't think it would take too much to get it working, but I just haven't tested yet.
 
 ### Hardware Support
-GPU - Nvidia, AMD, and Intel should work. I personally only have an Nvidia GPU so I haven't tested the others.  Please report issues if it isn't using your GPU when doing GPU operations(e.g. upscale). I tested on a 4090 with 24 GB of VRAM, but it should still work if you have less VRAM available it will just take longer.
+GPU - Nvidia, AMD, and Intel should work. I personally only have an Nvidia GPU so I haven't tested the others.  User "draghan" on discord tested AMD and it does appear to work in their testing.   Please report issues if it isn't using your GPU when doing GPU operations(e.g. upscale). I tested on a 4090 with 24 GB of VRAM, but it should still work if you have less VRAM available it will just take longer.
 
 CPU - More cores more speed, but any CPU should still funciton.  The tasks the project does requires ample CPU power though.  I don't recommend trying to perform pie4k operations on a system without a GPU, but it is technically still possible, but it will probably take several days to complete if not weeks.
 
@@ -72,17 +72,17 @@ You also need to have cuda installed if you have an Nvidia GPU.  If you have an 
 
 ## Roadmap
     Rules System
-      - Add a rule system that allows more finer grained control on how resources are processed.
+      RuleEngine - 50% - Rule system allows basic file operation skipping but is not super advanced yet.
     Python Support
       - Add the ability for people to create python scripts that perform additional operations.
     Resume Operations
-      - Resume 80% - Need the ability to resume and also make modifications selectively, but still allow a complete batch operation
+      - Resume 80% - Resume now works, if you want to run an operation and disregard resume use --force
     Mass Convert - PIE4k
       - MOS  100% - Extract,Upscale,Assemble
       - BAM  100% - Extract,Upscale,Assemble
       - TIS   90% - Extract,Upscale,Assemble - while everything works it could still be optimized for improved utilization.
       - ARE  100% - Extract,Upscale,Assemble
-      - BCS   50% - Extract,Upscale,Assemble - currently supports all operations, but it is hamfisted and not done properly.
+      - BCS   95% - Extract,Upscale,Assemble - Better support has been added, but still need a little more work to ensure only some functions are upscaled
       - BMP  100% - Extract,Upscale,Assemble
       - CHU  100% - Extract,Upscale,Assemble
       - KEY   10% - add/remove - This is not really well tested and I don't recommend using it right now.
@@ -103,7 +103,10 @@ You also need to have cuda installed if you have an Nvidia GPU.  If you have an 
       - Configuration options are currently limited.  Need more options for how things are handled such as alpha channels, colors, etc..
 
 ## GemRB Zoom & UpScaleFactor modifications
-So Zoom is mostly functional along with UpScaleFactor, but some issues remain for both and fully playing the games without issue is likely not possible although it is close and if you are willing please test and report issues.
+Overall the BG2 is still not playable.  It is getting closer though.
+ - zoomLevel added and mostly working in x1 and x4 which is what I tested so far in demo and bg2.
+ - UpScaleFactor working in most situations but still bugs exist that need to be fixed, but getting much closer.
+ - Door Closed state visuals not working.. should be fixed soon
 
 [![Watch the video](https://img.youtube.com/vi/LD_rzlRIpE4/hqdefault.jpg)](https://www.youtube.com/watch?v=JwuOLrcNN9c)
 
