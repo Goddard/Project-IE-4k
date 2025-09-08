@@ -41,11 +41,13 @@ public:
     bool assembleAllResources();
     bool completeAllResources();
     bool transferAssembledAssetsToOverride();
+    bool transferByResourceType(SClass_ID resourceType);
     
     // Type-specific batch operations
     bool extractAllResourcesOfType(SClass_ID resourceType);
     bool upscaleAllResourcesOfType(SClass_ID resourceType);
     bool assembleAllResourcesOfType(SClass_ID resourceType);
+    bool completeAllResourcesOfType(SClass_ID resourceType);
     
     // Individual resource operations
     bool extractResource(const std::string& resourceName, SClass_ID resourceType, bool enableStats = true);
@@ -76,6 +78,9 @@ public:
     // Batch lifecycle management
     void onBatchTypeStart(SClass_ID resourceType);
     void onBatchTypeEnd(SClass_ID resourceType);
+    
+    // Shared resource management
+    void ensureSharedResourcesInitialized(SClass_ID resourceType);
     
     // Internal sync operations
     bool syncUnsupportedOnly();
@@ -110,6 +115,10 @@ private:
     // PVRZ counter variables (moved from global scope)
     std::atomic<int> areaPVRZCounter_{0};
     std::atomic<int> mosPVRZCounter_{0};
+    
+    // Shared resource tracking
+    std::map<SClass_ID, bool> sharedResourcesInitialized_;
+    std::mutex sharedResourcesMutex_;
     
     // Helper methods
     std::unique_ptr<PluginBase> createPlugin(const std::string& resourceName, SClass_ID resourceType);

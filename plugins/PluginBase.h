@@ -49,6 +49,11 @@ public:
     virtual bool upscale();  // Default implementation uses UpscalerService
     virtual bool assemble() = 0;
     
+    // Shared resource management for batch operations
+    virtual bool initializeSharedResources() { return true; }
+    virtual void cleanupSharedResources() {}
+    virtual bool hasSharedResources() const { return false; }
+    
     // Static command registry
     static CommandTable& getCommandRegistry();
     

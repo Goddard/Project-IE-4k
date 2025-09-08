@@ -3,12 +3,12 @@
 #include <chrono>
 #include <algorithm>
 #include <iostream>
-#include <set>
 #include <sstream>
 #include <iomanip>
 
 #include "PluginBase.h"
 #include "core/CFG.h"
+#include "core/GlobalContext.h"
 #include "core/Logging/Logging.h"
 #include "core/OperationsMonitor/OperationsMonitor.h"
 #include "core/SClassID.h"
@@ -18,6 +18,7 @@
 #include "services/StatisticsService/StatisticsService.h"
 #include "services/ServiceManager.h"
 #include "services/OperationsTrackerService/OperationsTrackerService.h"
+#include "core/Rules/RulesEngine.h"
 
 namespace ProjectIE4k {
 
@@ -142,6 +143,57 @@ bool PluginManager::completeAllResources() {
     return extractSuccess || upscaleSuccess || assembleSuccess;
 }
 
+bool PluginManager::completeAllResourcesOfType(SClass_ID resourceType) {
+    std::string typeName = SClass::getExtension(resourceType);
+    Log(DEBUG, "PluginManager",
+        "Starting complete pipeline for type {}: extract -> upscale -> assemble -> transfer", typeName);
+    resetBatchStats();
+
+    auto startTime = std::chrono::high_resolution_clock::now();
+    
+    // Step 1: Extract all resources of this type
+    Log(MESSAGE, "PluginManager", "=== Step 1: Extracting all {} resources ===", typeName);
+    bool extractSuccess = extractAllResourcesOfType(resourceType);
+    if (!extractSuccess) {
+        Log(WARNING, "PluginManager", "Some {} extractions failed, but continuing with upscaling and assembly", typeName);
+    }
+    
+    // Step 2: Upscale all resources of this type
+    Log(MESSAGE, "PluginManager", "=== Step 2: Upscaling all {} resources ===", typeName);
+    bool upscaleSuccess = upscaleAllResourcesOfType(resourceType);
+    if (!upscaleSuccess) {
+        Log(WARNING, "PluginManager", "Some {} upscaling failed, but continuing with assembly", typeName);
+    }
+    
+    // Step 3: Assemble all resources of this type
+    Log(MESSAGE, "PluginManager", "=== Step 3: Assembling all {} resources ===", typeName);
+    bool assembleSuccess = assembleAllResourcesOfType(resourceType);
+    if (!assembleSuccess) {
+        Log(WARNING, "PluginManager", "Some {} assembly failed, but continuing with transfer", typeName);
+    }
+
+    // Step 4: Transfer assembled assets of this type to override
+    Log(MESSAGE, "PluginManager", "=== Step 4: Transferring {} assembled assets to override ===", typeName);
+    bool transferSuccess = transferByResourceType(resourceType);
+    if (!transferSuccess) {
+        Log(WARNING, "PluginManager", "Some {} transfer failed", typeName);
+    }
+
+    auto endTime = std::chrono::high_resolution_clock::now();
+    lastBatchStats_.totalTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+    
+    logBatchResults("complete pipeline for " + typeName, lastBatchStats_);
+    
+    // Flush logging system to ensure all messages are written before statistics
+    FlushLogs();
+
+    // Trigger batch complete lifecycle event (StatisticsService will generate summary)
+    ServiceManager::onBatchComplete();
+
+    // Return true if at least one operation succeeded in each phase
+    return extractSuccess || upscaleSuccess || assembleSuccess || transferSuccess;
+}
+
 bool PluginManager::extractAllResourcesOfType(SClass_ID resourceType) {
     // Ensure plugin is registered before proceeding
     ensurePluginRegistered(resourceType);
@@ -151,6 +203,9 @@ bool PluginManager::extractAllResourcesOfType(SClass_ID resourceType) {
         Log(ERROR, "PluginManager", "No plugin registered for resource type: {}", resourceType);
         return false;
     }
+    
+    // Initialize shared resources for this resource type before batch processing
+    ensureSharedResourcesInitialized(resourceType);
     
     // Reset thread count to starting value for extraction operations
     auto &monitor = OperationsMonitor::getInstance();
@@ -165,31 +220,42 @@ bool PluginManager::extractAllResourcesOfType(SClass_ID resourceType) {
     // Skip entire phase if .done marker exists and not forcing
     {
         auto* opsTracker = dynamic_cast<OperationsTrackerService*>(ServiceManager::getService("OperationsTrackerService"));
-        if (opsTracker) {
-            std::string phase = "extract";
-            std::string resourceTypeStr = SClass::getExtension(resourceType);
-            std::filesystem::path doneMarker = std::filesystem::path("output") / PIE4K_CFG.GameType / ".pie4k" / "complete" / (phase + "_" + resourceTypeStr + ".done");
-            if (std::filesystem::exists(doneMarker)) {
-                Log(MESSAGE, "PluginManager", "Phase '%s' for type %s already done, skipping", phase.c_str(), resourceTypeStr.c_str());
-                ServiceManager::onBatchExtractEnd();
-                onBatchTypeEnd(resourceType);
-                return true;
-            }
+        if (opsTracker && !opsTracker->shouldProcessPhase("extract", SClass::getExtension(resourceType))) {
+            ServiceManager::onBatchExtractEnd();
+            onBatchTypeEnd(resourceType);
+            return true;
         }
     }
 
     // Get all resources of this type from our resource service
-    auto resources = listResourcesByType(resourceType);
-    Log(DEBUG, "PluginManager", "Found {} resources of type {}", resources.size(), resourceType);
+    auto allResources = listResourcesByType(resourceType);
+    Log(DEBUG, "PluginManager", "Found {} resources of type {}", allResources.size(), resourceType);
+    
+    // Load rules once (fail-open if missing)
+    RulesEngine::getInstance().load();
+    
+    // Filter resources based on rules before counting for statistics
+    std::vector<std::string> resources;
+    for (const auto& resource : allResources) {
+        std::string resourceName = resource.c_str();
+        const char* typeStr = SClass::getExtension(resourceType);
+        if (RulesEngine::getInstance().shouldProcess("extract", typeStr, resourceName)) {
+            resources.push_back(resource);
+        } else {
+            Log(DEBUG, "PluginManager", "Rules: skipping extract for {} ({})", resourceName, typeStr);
+        }
+    }
+    
+    Log(MESSAGE, "PluginManager", "After rules filtering: {} {} resources to extract", resources.size(), SClass::getExtension(resourceType));
     
     if (resources.empty()) {
-        Log(WARNING, "PluginManager", "No resources found of type {}", resourceType);
+        Log(WARNING, "PluginManager", "No resources to extract after filtering for type {}", resourceType);
         onBatchTypeEnd(resourceType);
         ServiceManager::onBatchExtractEnd();
         return true; // Not an error, just no resources
     }
     
-    // Start statistics tracking
+    // Start statistics tracking with filtered count
     std::string processName = std::string("extract_") + SClass::getExtension(resourceType);
     auto* statsService = dynamic_cast<StatisticsService*>(ServiceManager::getService("StatisticsService"));
     if (statsService) {
@@ -210,8 +276,17 @@ bool PluginManager::extractAllResourcesOfType(SClass_ID resourceType) {
     std::vector<std::future<bool>> futures;
     std::atomic<bool> overallSuccess{true};
     
+    // Load rules once (fail-open if missing)
+    RulesEngine::getInstance().load();
+
     for (const auto& resourceName : resources) {
         std::string resourceNameStr = resourceName.c_str();
+        const char* typeStr = SClass::getExtension(resourceType);
+        if (!RulesEngine::getInstance().shouldProcess("extract", typeStr, resourceNameStr)) {
+            Log(DEBUG, "PluginManager", "Rules: skipping extract for {} ({})", resourceNameStr, typeStr);
+            if (statsService) { statsService->incrementProcessed(processName, true); }
+            continue;
+        }
         
         // Build fingerprint and skip if already processed
         OperationsTrackerService::InputFingerprint fp = makeInputFingerprint(resourceNameStr, resourceType, "extract_v1");
@@ -304,6 +379,9 @@ bool PluginManager::upscaleAllResourcesOfType(SClass_ID resourceType) {
         return false;
     }
     
+    // Initialize shared resources for this resource type before batch processing
+    ensureSharedResourcesInitialized(resourceType);
+    
     // Trigger batch upscale start lifecycle
     ServiceManager::onBatchUpscaleStart();
     
@@ -313,31 +391,42 @@ bool PluginManager::upscaleAllResourcesOfType(SClass_ID resourceType) {
     // Skip entire phase if .done marker exists and not forcing
     {
         auto* opsTracker = dynamic_cast<OperationsTrackerService*>(ServiceManager::getService("OperationsTrackerService"));
-        if (opsTracker) {
-            std::string phase = "upscale";
-            std::string resourceTypeStr = SClass::getExtension(resourceType);
-            std::filesystem::path doneMarker = std::filesystem::path("output") / PIE4K_CFG.GameType / ".pie4k" / "complete" / (phase + "_" + resourceTypeStr + ".done");
-            if (std::filesystem::exists(doneMarker)) {
-                Log(MESSAGE, "PluginManager", "Phase '%s' for type %s already done, skipping", phase.c_str(), resourceTypeStr.c_str());
-                ServiceManager::onBatchUpscaleEnd();
-                onBatchTypeEnd(resourceType);
-                return true;
-            }
+        if (opsTracker && !opsTracker->shouldProcessPhase("upscale", SClass::getExtension(resourceType))) {
+            ServiceManager::onBatchUpscaleEnd();
+            onBatchTypeEnd(resourceType);
+            return true;
         }
     }
 
     // Get all resources of this type from our resource service
-    auto resources = listResourcesByType(resourceType);
-    Log(DEBUG, "PluginManager", "Found {} resources of type {}", resources.size(), resourceType);
+    auto allResources = listResourcesByType(resourceType);
+    Log(DEBUG, "PluginManager", "Found {} resources of type {}", allResources.size(), resourceType);
+    
+    // Load rules once (fail-open if missing)
+    RulesEngine::getInstance().load();
+    
+    // Filter resources based on rules before counting for statistics
+    std::vector<std::string> resources;
+    for (const auto& resource : allResources) {
+        std::string resourceName = resource.c_str();
+        const char* typeStr = SClass::getExtension(resourceType);
+        if (RulesEngine::getInstance().shouldProcess("upscale", typeStr, resourceName)) {
+            resources.push_back(resource);
+        } else {
+            Log(DEBUG, "PluginManager", "Rules: skipping upscale for {} ({})", resourceName, typeStr);
+        }
+    }
+    
+    Log(MESSAGE, "PluginManager", "After rules filtering: {} {} resources to upscale", resources.size(), SClass::getExtension(resourceType));
     
     if (resources.empty()) {
-        Log(WARNING, "PluginManager", "No resources found of type {}", resourceType);
+        Log(WARNING, "PluginManager", "No resources to upscale after filtering for type {}", resourceType);
         onBatchTypeEnd(resourceType);
         ServiceManager::onBatchUpscaleEnd();
         return true; // Not an error, just no resources
     }
     
-    // Start statistics tracking
+    // Start statistics tracking with filtered count
     std::string processName = std::string("upscale_") + SClass::getExtension(resourceType);
     auto* statsService = dynamic_cast<StatisticsService*>(ServiceManager::getService("StatisticsService"));
     if (statsService) {
@@ -350,6 +439,7 @@ bool PluginManager::upscaleAllResourcesOfType(SClass_ID resourceType) {
     }
     
     bool success = true;
+
     for (const auto& resourceName : resources) {
         std::string resourceNameStr = resourceName.c_str();
         Log(DEBUG, "PluginManager", "Processing resource: {}", resourceNameStr);
@@ -412,6 +502,9 @@ bool PluginManager::assembleAllResourcesOfType(SClass_ID resourceType) {
         return false;
     }
     
+    // Initialize shared resources for this resource type before batch processing
+    ensureSharedResourcesInitialized(resourceType);
+    
     // Trigger batch assemble start lifecycle
     ServiceManager::onBatchAssembleStart();
     
@@ -421,31 +514,42 @@ bool PluginManager::assembleAllResourcesOfType(SClass_ID resourceType) {
     // Skip entire phase if .done marker exists and not forcing
     {
         auto* opsTracker = dynamic_cast<OperationsTrackerService*>(ServiceManager::getService("OperationsTrackerService"));
-        if (opsTracker) {
-            std::string phase = "assemble";
-            std::string resourceTypeStr = SClass::getExtension(resourceType);
-            std::filesystem::path doneMarker = std::filesystem::path("output") / PIE4K_CFG.GameType / ".pie4k" / "complete" / (phase + "_" + resourceTypeStr + ".done");
-            if (std::filesystem::exists(doneMarker)) {
-                Log(MESSAGE, "PluginManager", "Phase '%s' for type %s already done, skipping", phase.c_str(), resourceTypeStr.c_str());
-                ServiceManager::onBatchAssembleEnd();
-                onBatchTypeEnd(resourceType);
-                return true;
-            }
+        if (opsTracker && !opsTracker->shouldProcessPhase("assemble", SClass::getExtension(resourceType))) {
+            ServiceManager::onBatchAssembleEnd();
+            onBatchTypeEnd(resourceType);
+            return true;
         }
     }
 
     // Get all resources of this type from our resource service
-    auto resources = listResourcesByType(resourceType);
-    Log(DEBUG, "PluginManager", "Found {} resources of type {}", resources.size(), resourceType);
+    auto allResources = listResourcesByType(resourceType);
+    Log(DEBUG, "PluginManager", "Found {} resources of type {}", allResources.size(), resourceType);
+    
+    // Load rules once (fail-open if missing)
+    RulesEngine::getInstance().load();
+    
+    // Filter resources based on rules before counting for statistics
+    std::vector<std::string> resources;
+    for (const auto& resource : allResources) {
+        std::string resourceName = resource.c_str();
+        const char* typeStr = SClass::getExtension(resourceType);
+        if (RulesEngine::getInstance().shouldProcess("assemble", typeStr, resourceName)) {
+            resources.push_back(resource);
+        } else {
+            Log(DEBUG, "PluginManager", "Rules: skipping assemble for {} ({})", resourceName, typeStr);
+        }
+    }
+    
+    Log(MESSAGE, "PluginManager", "After rules filtering: {} {} resources to assemble", resources.size(), SClass::getExtension(resourceType));
     
     if (resources.empty()) {
-        Log(WARNING, "PluginManager", "No resources found of type {}", resourceType);
+        Log(WARNING, "PluginManager", "No resources to assemble after filtering for type {}", resourceType);
         onBatchTypeEnd(resourceType);
         ServiceManager::onBatchAssembleEnd();
         return true; // Not an error, just no resources
     }
     
-    // Start statistics tracking
+    // Start statistics tracking with filtered count
     std::string processName = std::string("assemble_") + SClass::getExtension(resourceType);
     auto* statsService = dynamic_cast<StatisticsService*>(ServiceManager::getService("StatisticsService"));
     if (statsService) {
@@ -466,8 +570,17 @@ bool PluginManager::assembleAllResourcesOfType(SClass_ID resourceType) {
     std::vector<std::future<bool>> futures;
     std::atomic<bool> overallSuccess{true};
 
+    // Load rules once (fail-open if missing)
+    RulesEngine::getInstance().load();
+
     for (const auto& resourceName : resources) {
         std::string resourceNameStr = resourceName.c_str();
+        const char* typeStr = SClass::getExtension(resourceType);
+        if (!RulesEngine::getInstance().shouldProcess("assemble", typeStr, resourceNameStr)) {
+            Log(DEBUG, "PluginManager", "Rules: skipping assemble for {} ({})", resourceNameStr, typeStr);
+            if (statsService) { statsService->incrementProcessed(processName, true); }
+            continue;
+        }
 
         OperationsTrackerService::InputFingerprint fp = makeInputFingerprint(resourceNameStr, resourceType, "assemble_v1");
         if (opsTracker && !opsTracker->shouldProcess("assemble", SClass::getExtension(resourceType), resourceNameStr, fp, false)) {
@@ -551,6 +664,9 @@ bool PluginManager::assembleAllResourcesOfType(SClass_ID resourceType) {
 bool PluginManager::extractResource(const std::string& resourceName, SClass_ID resourceType, bool enableStats) {
     Log(DEBUG, "PluginManager", "extractResource called with resourceName: '{}', resourceType: {}", resourceName, resourceType);
     
+    // Initialize shared resources for this resource type (for individual operations)
+    ensureSharedResourcesInitialized(resourceType);
+    
     // Start statistics tracking for single resource extraction (only if enabled)
     std::string processName = "extract_single_" + resourceName;
     auto* statsService = dynamic_cast<StatisticsService*>(ServiceManager::getService("StatisticsService"));
@@ -597,6 +713,9 @@ bool PluginManager::extractResource(const std::string& resourceName, SClass_ID r
 }
 
 bool PluginManager::upscaleResource(const std::string& resourceName, SClass_ID resourceType, bool enableStats) {
+    // Initialize shared resources for this resource type (for individual operations)
+    ensureSharedResourcesInitialized(resourceType);
+    
     // Start Services
     onBatchTypeStart(resourceType);
     
@@ -651,6 +770,9 @@ bool PluginManager::upscaleResource(const std::string& resourceName, SClass_ID r
 }
 
 bool PluginManager::assembleResource(const std::string& resourceName, SClass_ID resourceType, bool enableStats) {
+    // Initialize shared resources for this resource type (for individual operations)
+    ensureSharedResourcesInitialized(resourceType);
+    
     // Start statistics tracking for single resource assembly (only if enabled)
     std::string processName = "assemble_single_" + resourceName;
     auto* statsService = dynamic_cast<StatisticsService*>(ServiceManager::getService("StatisticsService"));
@@ -765,6 +887,17 @@ void PluginManager::registerAllCommands(CommandTable& commandTable) {
                     SClass_ID resourceType = getResourceTypeFromString(args[0]);
                     return assembleAllResourcesOfType(resourceType) ? 0 : 1;
                 }
+            }},
+            {"completeType", {
+                "Complete pipeline for specific type: extract -> upscale -> assemble -> transfer (e.g., batch completeType mos)",
+                [this](const std::vector<std::string>& args) -> int {
+                    if (args.empty()) {
+                        std::cerr << "Usage: batch completeType <resource_type>" << std::endl;
+                        return 1;
+                    }
+                    SClass_ID resourceType = getResourceTypeFromString(args[0]);
+                    return completeAllResourcesOfType(resourceType) ? 0 : 1;
+                }
             }}
         }
     };
@@ -777,6 +910,19 @@ void PluginManager::registerAllCommands(CommandTable& commandTable) {
                 "Transfer all assembled assets to directory based on GameType & UpScaleFactor e.g. demo-overrideX4",
                 [this](const std::vector<std::string>& args) -> int {
                     return transferAssembledAssetsToOverride() ? 0 : 1;
+                }
+            }}
+            ,
+            {"type", {
+                "Transfer assembled assets of a specific type (e.g., transfer type bcs)",
+                [this](const std::vector<std::string>& args) -> int {
+                    if (args.empty()) {
+                        std::cerr << "Usage: transfer type <resource_type>" << std::endl;
+                        return 1;
+                    }
+                    SClass_ID resourceType = getResourceTypeFromString(args[0]);
+                    if (resourceType == 0) return 1;
+                    return transferByResourceType(resourceType) ? 0 : 1;
                 }
             }}
         }
@@ -848,25 +994,34 @@ SClass_ID PluginManager::getResourceTypeFromString(const std::string& typeString
     return 0;
 }
 
-
-
 bool PluginManager::transferAssembledAssetsToOverride() {
-    std::string gameType = PIE4K_CFG.GameType;
-
-    // Get UpScaleFactor from config to determine directory name
-    int upscaleFactor = PIE4K_CFG.UpScaleFactor;
-    if (upscaleFactor <= 0) {
-        upscaleFactor = 1; // Default to 1 if not set or invalid
-    }
-    
     // Create directory name based on GameType & UpScaleFactor
-    std::string dirName = gameType + "-overrideX" + std::to_string(upscaleFactor);
+    std::string dirName = PIE4K_CFG.GameType + "-overrideX" + std::to_string(PIE4K_CFG.UpScaleFactor);
     
     // Create target directory path in the same directory as the binary
     fs::path binaryPath = fs::current_path();
     fs::path targetDir = binaryPath / dirName;
     
     Log(MESSAGE, "PluginManager", "Starting transfer of assembled assets to: {}", targetDir.string());
+    
+    // Start statistics tracking
+    std::string processName = "transfer_all_assembled";
+    auto* statsService = dynamic_cast<StatisticsService*>(ServiceManager::getService("StatisticsService"));
+    
+    // Count total resources across all types for statistics
+    int totalResourceCount = 0;
+    auto supportedTypesForCount = getSupportedResourceTypes();
+    for (SClass_ID resourceType : supportedTypesForCount) {
+        auto resources = listResourcesByType(resourceType);
+        totalResourceCount += resources.size();
+    }
+    
+    if (statsService) {
+        statsService->startProcess(processName, "ALL", totalResourceCount);
+    }
+    
+    // Load rules once (fail-open if missing)
+    RulesEngine::getInstance().load();
     
     // Create target directory if it doesn't exist
     if (!fs::exists(targetDir)) {
@@ -875,6 +1030,10 @@ bool PluginManager::transferAssembledAssetsToOverride() {
             fs::create_directories(targetDir);
         } catch (const fs::filesystem_error& e) {
             Log(ERROR, "PluginManager", "Failed to create target directory: {}", e.what());
+            if (statsService) {
+                statsService->recordError(processName, "Failed to create target directory: " + std::string(e.what()));
+                statsService->endProcess(processName);
+            }
             return false;
         }
     }
@@ -914,10 +1073,22 @@ bool PluginManager::transferAssembledAssetsToOverride() {
         for (const auto& resource : resources) {
             std::string resourceName = resource.c_str();
             
+            // Check rules - skip if this resource should not be transferred
+            if (!RulesEngine::getInstance().shouldProcess("transfer", typeName.c_str(), resourceName)) {
+                Log(DEBUG, "PluginManager", "Rules: skipping transfer for {} ({})", resourceName, typeName);
+                if (statsService) { 
+                    statsService->incrementProcessed(processName, true); 
+                }
+                continue;
+            }
+            
             // Create a temporary plugin instance to get the assemble directory
             auto plugin = createPlugin(resourceName, resourceType);
             if (!plugin) {
                 Log(ERROR, "PluginManager", "Failed to create plugin for {}: {}", resourceName, typeName);
+                if (statsService) {
+                    statsService->recordError(processName, resourceName);
+                }
                 typeErrors++;
                 totalErrors++;
                 continue;
@@ -961,6 +1132,9 @@ bool PluginManager::transferAssembledAssetsToOverride() {
                         resourceTransferred = true;
                     } catch (const fs::filesystem_error& e) {
                         Log(ERROR, "PluginManager", "Failed to transfer {}: {}", fileName, e.what());
+                        if (statsService) {
+                            statsService->recordError(processName, resourceName);
+                        }
                         typeErrors++;
                         totalErrors++;
                     }
@@ -980,8 +1154,16 @@ bool PluginManager::transferAssembledAssetsToOverride() {
                 
             } catch (const fs::filesystem_error& e) {
                 Log(ERROR, "PluginManager", "Error scanning assembled directory for {}: {}", resourceName, e.what());
+                if (statsService) {
+                    statsService->recordError(processName, resourceName);
+                }
                 typeErrors++;
                 totalErrors++;
+            }
+            
+            // Update progress for this resource
+            if (statsService) {
+                statsService->incrementProcessed(processName, resourceTransferred);
             }
         }
         
@@ -998,7 +1180,143 @@ bool PluginManager::transferAssembledAssetsToOverride() {
     
     Log(MESSAGE, "PluginManager", "Transfer complete. Total transferred: {}, Total overwrites: {}, Total errors: {}", 
         totalTransferred, totalOverwrites, totalErrors);
+    
+    // Complete statistics tracking
+    if (statsService) {
+        statsService->endProcess(processName);
+    }
+    
     return totalErrors == 0;
+}
+
+bool PluginManager::transferByResourceType(SClass_ID resourceType) {
+    std::string dirName = PIE4K_CFG.GameType + "-overrideX" + std::to_string(PIE4K_CFG.UpScaleFactor);
+    fs::path binaryPath = fs::current_path();
+    fs::path targetDir = binaryPath / dirName;
+
+    std::string typeName = SClass::getExtension(resourceType);
+    Log(MESSAGE, "PluginManager", "Transferring assembled {} assets to: {}", typeName, targetDir.string());
+
+    if (!fs::exists(targetDir)) {
+        try {
+            fs::create_directories(targetDir);
+        } catch (const fs::filesystem_error& e) {
+            Log(ERROR, "PluginManager", "Failed creating target directory: {}", e.what());
+            return false;
+        }
+    }
+
+    // List resources of this specific type
+    auto allResources = listResourcesByType(resourceType);
+    Log(MESSAGE, "PluginManager", "Found {} {} resources", allResources.size(), typeName);
+
+    // Load rules once (fail-open if missing)
+    RulesEngine::getInstance().load();
+    
+    // Filter resources based on rules before counting for statistics
+    std::vector<std::string> resources;
+    for (const auto& resource : allResources) {
+        std::string resourceName = resource.c_str();
+        if (RulesEngine::getInstance().shouldProcess("transfer", typeName.c_str(), resourceName)) {
+            resources.push_back(resource);
+        } else {
+            Log(DEBUG, "PluginManager", "Rules: skipping transfer for {} ({})", resourceName, typeName);
+        }
+    }
+    
+    Log(MESSAGE, "PluginManager", "After rules filtering: {} {} resources to transfer", resources.size(), typeName);
+
+    // Start statistics tracking with filtered count
+    std::string processName = std::string("transfer_") + typeName;
+    auto* statsService = dynamic_cast<StatisticsService*>(ServiceManager::getService("StatisticsService"));
+    if (statsService) {
+        statsService->startProcess(processName, typeName, resources.size());
+    }
+
+    int transferred = 0, overwrites = 0, errors = 0, foundAssembled = 0;
+
+    for (const auto &resource : resources) {
+        std::string resourceName = resource.c_str();
+        
+        auto plugin = createPlugin(resourceName, resourceType);
+        if (!plugin) {
+            Log(ERROR, "PluginManager", "Failed to create plugin for {} ({})", resourceName, typeName);
+            if (statsService) {
+                statsService->recordError(processName, resourceName + ": Failed to create plugin");
+                statsService->incrementProcessed(processName, false);
+            }
+            errors++;
+            continue;
+        }
+
+        std::string assembleDirPath = plugin->getAssembleDir(false);
+        int filesInDirectory = 0;
+        bool resourceTransferred = false;
+        
+        // Check if assembled directory exists
+        if (!fs::exists(assembleDirPath)) {
+            Log(DEBUG, "PluginManager", "No assembled output for {} ({}): {}", resourceName, typeName, assembleDirPath);
+            if (statsService) {
+                statsService->recordError(processName, resourceName);
+                statsService->incrementProcessed(processName, false);
+            }
+            errors++;
+            continue;
+        }
+        
+        try {
+            for (const auto &fileEntry : fs::directory_iterator(assembleDirPath)) {
+                if (!fileEntry.is_regular_file()) continue;
+                filesInDirectory++;
+                std::string fileName = fileEntry.path().filename().string();
+                std::string sourcePath = fileEntry.path().string();
+                std::string targetPath = (targetDir / fileName).string();
+
+                bool exists = fs::exists(targetPath);
+                try {
+                    fs::copy_file(sourcePath, targetPath, fs::copy_options::overwrite_existing);
+                    if (exists) { overwrites++; Log(MESSAGE, "PluginManager", "Overwrote {} -> {}", fileName, targetPath); }
+                    else { Log(MESSAGE, "PluginManager", "Transferred {} -> {}", fileName, targetPath); }
+                    transferred++; resourceTransferred = true;
+                } catch (const fs::filesystem_error& e) {
+                    Log(ERROR, "PluginManager", "Copy failed for {} ({}): {}", resourceName, fileName, e.what());
+                    if (statsService) {
+                        statsService->recordError(processName, resourceName + ": " + e.what());
+                    }
+                    errors++;
+                }
+            }
+            if (filesInDirectory > 0) {
+                foundAssembled++;
+                Log(DEBUG, "PluginManager", "Successfully transferred {} ({}) - {} files", resourceName, typeName, filesInDirectory);
+            } else {
+                Log(WARNING, "PluginManager", "Empty assembled directory for {} ({}): {}", resourceName, typeName, assembleDirPath);
+            }
+        } catch (const fs::filesystem_error& e) {
+            Log(ERROR, "PluginManager", "Error scanning assembled dir for {} ({}): {}", resourceName, typeName, e.what());
+            if (statsService) {
+                statsService->recordError(processName, resourceName + ": " + e.what());
+            }
+            errors++;
+        }
+        
+        // Update progress for this resource
+        if (statsService) {
+            statsService->incrementProcessed(processName, resourceTransferred);
+        }
+    }
+
+    // Complete statistics tracking
+    if (statsService) {
+        statsService->endProcess(processName);
+    }
+
+    Log(MESSAGE, "PluginManager", "{} transfer summary:", typeName);
+    Log(MESSAGE, "PluginManager", "  Resources with assembled output: {}", foundAssembled);
+    Log(MESSAGE, "PluginManager", "  Files transferred: {} ({} overwrites)", transferred, overwrites);
+    Log(MESSAGE, "PluginManager", "  Errors: {}", errors);
+
+    return errors == 0;
 }
 
 void PluginManager::registerService(const std::string& serviceName, std::unique_ptr<ServiceBase> service) {
@@ -1251,6 +1569,36 @@ OperationsTrackerService::InputFingerprint PluginManager::makeInputFingerprint(c
         }
     }
     return fp;
+}
+
+void PluginManager::ensureSharedResourcesInitialized(SClass_ID resourceType) {
+    std::lock_guard<std::mutex> lk(sharedResourcesMutex_);
+    // Check if already initialized
+    if (sharedResourcesInitialized_[resourceType]) return;
+
+    Log(DEBUG, "PluginManager", "Initializing shared resources for resource type: {}", resourceType);
+
+    // Create a temporary plugin instance to initialize shared resources
+    auto tempPlugin = createPlugin("__shared_init__", resourceType);
+    if (!tempPlugin) {
+        Log(WARNING, "PluginManager", "Failed to create plugin for shared resource initialization: {}", resourceType);
+        return;
+    }
+
+    // Check if this plugin has shared resources
+    if (!tempPlugin->hasSharedResources()) {
+        Log(DEBUG, "PluginManager", "Resource type {} has no shared resources", resourceType);
+        sharedResourcesInitialized_[resourceType] = true;
+        return;
+    }
+
+    // Initialize shared resources
+    if (tempPlugin->initializeSharedResources()) {
+        Log(MESSAGE, "PluginManager", "Successfully initialized shared resources for resource type: {}", resourceType);
+        sharedResourcesInitialized_[resourceType] = true;
+    } else {
+        Log(ERROR, "PluginManager", "Failed to initialize shared resources for resource type: {}", resourceType);
+    }
 }
 
 } // namespace ProjectIE4k 
