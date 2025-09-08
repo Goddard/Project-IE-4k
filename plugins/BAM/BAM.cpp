@@ -420,7 +420,8 @@ bool BAM::convertPngToBamV1() {
           frameEntry.centerX = 0;
           frameEntry.centerY = 0;
         }
-        // dataOffset will be 0 due to {} initialization, let serialize() handle it
+        // Mark as uncompressed (single pixel doesn't benefit from RLE)
+        frameEntry.dataOffset = 0x80000000;
         frameEntries[frameIndex] = frameEntry;
         frameData[frameIndex] = std::vector<uint8_t>(1, compressedColor);
         continue;
@@ -456,7 +457,7 @@ bool BAM::convertPngToBamV1() {
         return false;
       }
 
-      // dataOffset will be 0 due to {} initialization, let serialize() handle it
+      // dataOffset will be set during RLE compression phase
       frameEntries[frameIndex] = frameEntry;
 
       // Convert ARGB to palette indices
@@ -479,20 +480,16 @@ bool BAM::convertPngToBamV1() {
     // Apply RLE compression to frames if beneficial; use compressedColor from original header
     for (size_t i = 0; i < frameData.size(); i++) {
       std::vector<uint8_t> &framePixels = frameData[i];
+      BAMV1FrameEntry &frameEntry = frameEntries[i];
 
-      // Apply RLE compression if beneficial
-      std::vector<uint8_t> compressedData =
-          compressFrameRLE(framePixels, compressedColor);
-
-      if (compressedData.size() < framePixels.size()) {
-        frameData[i] = compressedData;
-        // Don't set dataOffset here - let serialize() handle it
-      } else {
-        // Don't set dataOffset here - let serialize() handle it
-      }
+      // For upscaled images, skip RLE compression to avoid issues
+      // Always use uncompressed data for better compatibility
+      frameEntry.dataOffset = 0x80000000; // Mark as uncompressed (bit 31 = 1)
     }
 
     // Build the BAM V1 file structure (preserve original frame count)
+    memcpy(bamV1File.header.signature, "BAM ", 4);
+    memcpy(bamV1File.header.version, "V1  ", 4);
     bamV1File.header.frameCount = static_cast<uint16_t>(originalFrameCount);
     bamV1File.header.cycleCount = static_cast<uint8_t>(cycles.size());
     bamV1File.header.compressedColor = compressedColor;
@@ -1083,7 +1080,6 @@ void BAM::registerCommands(CommandTable& commandTable) {
     };
 }
 
-// Auto-register the BAM plugin
 REGISTER_PLUGIN(BAM, IE_BAM_CLASS_ID);
 
 } // namespace ProjectIE4k

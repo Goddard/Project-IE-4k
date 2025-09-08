@@ -7,6 +7,7 @@
 #include <map>
 
 #include "core/SClassID.h"
+#include "plugins/CommandRegistry.h"
 
 namespace ProjectIE4k {
 
@@ -14,8 +15,7 @@ KEY::KEY(const std::string& filePath)
     : filePath(filePath), valid(false) {
 }
 
-KEY::~KEY() {
-}
+KEY::~KEY() { }
 
 bool KEY::load() {
     // Debug: verify struct sizes match IESDP specification
@@ -371,10 +371,8 @@ bool KEY::removeResource(size_t index) {
     return true;
 }
 
-} // namespace ProjectIE4k
-
-void ProjectIE4k::KEY::registerCommands(CommandTable& commandTable) {
-    ProjectIE4k::Command keyCommand;
+void KEY::registerCommands(CommandTable& commandTable) {
+    Command keyCommand;
     keyCommand.help = "KEY file operations";
     
     // Load command
@@ -484,3 +482,8 @@ void ProjectIE4k::KEY::registerCommands(CommandTable& commandTable) {
     
     commandTable["key"] = keyCommand;
 }
+
+
+// REGISTER_PLUGIN(KEY, IE_KEY_CLASS_ID);
+
+} // namespace ProjectIE4k

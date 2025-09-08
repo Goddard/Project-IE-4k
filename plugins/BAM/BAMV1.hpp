@@ -12,14 +12,20 @@ namespace ProjectIE4k {
 
 struct BAMV1Header {
     char signature[4];        // 'BAM '
-    char version[4];          // 'V1 '
+    char version[4];          // 'V1  '
     uint16_t frameCount;      // Count of frame entries
     uint8_t cycleCount;       // Count of cycles
     uint8_t compressedColor;  // The compressed colour index for RLE encoded bams
     uint32_t frameEntriesOffset;  // Offset to frame entries
     uint32_t paletteOffset;       // Offset to palette
     uint32_t frameLookupTableOffset; // Offset to frame lookup table
-    
+
+    BAMV1Header() : frameCount(0), cycleCount(0), compressedColor(0),
+                   frameEntriesOffset(0), paletteOffset(0), frameLookupTableOffset(0) {
+        memcpy(signature, "BAM ", 4);
+        memcpy(version, "V1  ", 4);
+    }
+
     void setCounts(uint32_t frames, uint32_t cycles) {
         frameCount = static_cast<uint16_t>(frames);
         cycleCount = static_cast<uint8_t>(cycles);
@@ -136,16 +142,10 @@ struct BAMV1File {
         for (size_t i = 0; i < frameEntries.size(); i++) {
             BAMV1FrameEntry entry = frameEntries[i];
             
-            // Set the data offset
-            if (entry.dataOffset == 0) {
-                // RLE compressed
-                entry.dataOffset = static_cast<uint32_t>(frameDataStart);
-                frameDataStart += frameData[i].size();
-            } else {
-                // Uncompressed
-                entry.dataOffset = static_cast<uint32_t>(frameDataStart) | 0x80000000;
-                frameDataStart += frameData[i].size();
-            }
+            // Set the data offset, preserving the compression flag from bit 31
+            uint32_t compressionFlag = entry.dataOffset & 0x80000000; // Preserve existing compression flag
+            entry.dataOffset = static_cast<uint32_t>(frameDataStart) | compressionFlag;
+            frameDataStart += frameData[i].size();
             
             const uint8_t* entryPtr = reinterpret_cast<const uint8_t*>(&entry);
             data.insert(data.end(), entryPtr, entryPtr + sizeof(BAMV1FrameEntry));
