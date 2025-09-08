@@ -45,7 +45,7 @@ public:
     std::string getAssembleDir(bool ensureDir = true) const override;
 
     // ARE-specific methods
-    bool saveToFile(const std::string& filePath) const;
+    bool saveToFile(const std::string& filePath);
 
 private:
     AREFile areFile;

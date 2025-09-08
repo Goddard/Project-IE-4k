@@ -52,8 +52,14 @@ ARE::ARE(const std::string& resourceName) : PluginBase(resourceName, IE_ARE_CLAS
     Log(DEBUG, "ARE", "  Doors: {} (offset: {})", areFile.header.doorsCount, areFile.header.doorsOffset);
     Log(DEBUG, "ARE", "  Animations: {} (offset: {})", areFile.header.animationsCount, areFile.header.animationsOffset);
     Log(DEBUG, "ARE", "  Tiled Objects: {} (offset: {})", areFile.header.tiledObjectsCount, areFile.header.tiledObjectsOffset);
-    Log(DEBUG, "ARE", "  Automap Notes: {} (offset: {})", areFile.header.automapNoteCount, areFile.header.automapNoteOffset);
-    Log(DEBUG, "ARE", "  Projectile Traps: {} (offset: {})", areFile.header.projectileTrapsCount, areFile.header.projectileTrapsOffset);
+    // Game-specific field access through union
+    if (PIE4K_CFG.GameType == "pst") {
+        Log(DEBUG, "ARE", "  Automap Notes: {} (offset: {})", areFile.header.gameSpecific.pst.automapNoteCount, areFile.header.gameSpecific.pst.automapNoteOffset);
+        Log(DEBUG, "ARE", "  Projectile Traps: {} (offset: {})", areFile.header.gameSpecific.pst.projectileTrapsCount, areFile.header.gameSpecific.pst.projectileTrapsOffset);
+    } else {
+        Log(DEBUG, "ARE", "  Automap Notes: {} (offset: {})", areFile.header.gameSpecific.standard.automapNoteCount, areFile.header.gameSpecific.standard.automapNoteOffset);
+        Log(DEBUG, "ARE", "  Projectile Traps: {} (offset: {})", areFile.header.gameSpecific.standard.projectileTrapsCount, areFile.header.gameSpecific.standard.projectileTrapsOffset);
+    }
     Log(DEBUG, "ARE", "  Tiled Object Flags: {} (offset: {})", areFile.header.tiledObjectFlagsCount, areFile.header.tiledObjectFlagsOffset);
     Log(DEBUG, "ARE", "  Song Entries Offset: {}", areFile.header.songEntriesOffset);
     Log(DEBUG, "ARE", "  Rest Interruptions Offset: {}", areFile.header.restInterruptionsOffset);
@@ -90,9 +96,19 @@ ARE::~ARE() {
     
     areFile.variables.clear();
     areFile.variables.shrink_to_fit();
-    
-    areFile.exploredBitmask.clear();
-    areFile.exploredBitmask.shrink_to_fit();
+
+    // Keep explored bitmask as-is since area dimensions don't change during upscaling
+    // areFile.exploredBitmask.clear();
+    // areFile.exploredBitmask.shrink_to_fit();
+
+    // Ensure explored bitmask header values are correct
+    if (areFile.exploredBitmask.empty()) {
+        areFile.header.exploredBitmaskSize = 0;
+        areFile.header.exploredBitmaskOffset = 0;
+        Log(DEBUG, "ARE", "Explored bitmask is empty, setting size=0, offset=0");
+    } else {
+        Log(DEBUG, "ARE", "Explored bitmask has {} bytes", areFile.exploredBitmask.size());
+    }
     
     areFile.doors.clear();
     areFile.doors.shrink_to_fit();
@@ -235,8 +251,43 @@ bool ARE::upscale() {
         ambient.height = static_cast<uint16_t>(ambient.height * scaleFactor);
     }
 
-    // Scale door positions and bounding boxes
-    for (auto& door : areFile.doors) {
+    // FIRST: Collect original door impeded ranges BEFORE upscaling doors
+    std::vector<std::pair<uint32_t, uint16_t>> doorImpededRanges; // {start_index, count}
+    for (const auto& door : areFile.doors) {
+        if (door.openImpededCellBlockCount > 0) {
+            uint32_t endIdx = door.openImpededCellBlockIndex + door.openImpededCellBlockCount;
+            if (endIdx <= areFile.vertices.size()) {
+                doorImpededRanges.push_back({door.openImpededCellBlockIndex, door.openImpededCellBlockCount});
+                Log(DEBUG, "ARE", "Original door impeded range: index={} count={}", door.openImpededCellBlockIndex, door.openImpededCellBlockCount);
+            } else {
+                Log(DEBUG, "ARE", "Skipping invalid door impeded range: index={} count={} (end={} > vertices={})",
+                    door.openImpededCellBlockIndex, door.openImpededCellBlockCount, endIdx, areFile.vertices.size());
+            }
+        }
+        if (door.closedImpededCellBlockCount > 0) {
+            uint32_t endIdx = door.closedImpededCellBlockIndex + door.closedImpededCellBlockCount;
+            if (endIdx <= areFile.vertices.size()) {
+                doorImpededRanges.push_back({door.closedImpededCellBlockIndex, door.closedImpededCellBlockCount});
+                Log(DEBUG, "ARE", "Original door impeded range: index={} count={}", door.closedImpededCellBlockIndex, door.closedImpededCellBlockCount);
+            } else {
+                Log(DEBUG, "ARE", "Skipping invalid door impeded range: index={} count={} (end={} > vertices={})",
+                    door.closedImpededCellBlockIndex, door.closedImpededCellBlockCount, endIdx, areFile.vertices.size());
+            }
+        }
+    }
+
+    // Scale door positions and bounding boxes, and expand impeded cells
+    for (size_t doorIdx = 0; doorIdx < areFile.doors.size(); doorIdx++) {
+        auto& door = areFile.doors[doorIdx];
+        
+        Log(DEBUG, "ARE", "Door {}: Before scaling - Open bbox: [{},{},{},{}], Closed bbox: [{},{},{},{}]",
+            doorIdx, door.openBoundingBox[0], door.openBoundingBox[1], door.openBoundingBox[2], door.openBoundingBox[3],
+            door.closedBoundingBox[0], door.closedBoundingBox[1], door.closedBoundingBox[2], door.closedBoundingBox[3]);
+        
+        Log(DEBUG, "ARE", "Door {}: Before scaling - Open impeded: index={} count={}, Closed impeded: index={} count={}",
+            doorIdx, door.openImpededCellBlockIndex, door.openImpededCellBlockCount,
+            door.closedImpededCellBlockIndex, door.closedImpededCellBlockCount);
+        
         for (int i = 0; i < 4; ++i) {
             door.openBoundingBox[i] = static_cast<int16_t>(door.openBoundingBox[i] * scaleFactor);
             door.closedBoundingBox[i] = static_cast<int16_t>(door.closedBoundingBox[i] * scaleFactor);
@@ -249,6 +300,22 @@ bool ARE::upscale() {
         // Scale trap launch target coordinates
         door.trapLaunchTargetX = static_cast<int16_t>(door.trapLaunchTargetX * scaleFactor);
         door.trapLaunchTargetY = static_cast<int16_t>(door.trapLaunchTargetY * scaleFactor);
+        
+        // Expand impeded cell counts proportionally to upscale factor squared
+        uint16_t originalOpenCount = door.openImpededCellBlockCount;
+        uint16_t originalClosedCount = door.closedImpededCellBlockCount;
+        uint32_t doorExpansionFactor = static_cast<uint32_t>(scaleFactor * scaleFactor);
+        
+        door.openImpededCellBlockCount = originalOpenCount * doorExpansionFactor;
+        door.closedImpededCellBlockCount = originalClosedCount * doorExpansionFactor;
+        
+        Log(DEBUG, "ARE", "Door {}: After scaling - Open bbox: [{},{},{},{}], Closed bbox: [{},{},{},{}]",
+            doorIdx, door.openBoundingBox[0], door.openBoundingBox[1], door.openBoundingBox[2], door.openBoundingBox[3],
+            door.closedBoundingBox[0], door.closedBoundingBox[1], door.closedBoundingBox[2], door.closedBoundingBox[3]);
+        
+        Log(DEBUG, "ARE", "Door {}: After scaling - Open impeded: count {}->{}  Closed impeded: count {}->{}",
+            doorIdx, originalOpenCount, door.openImpededCellBlockCount,
+            originalClosedCount, door.closedImpededCellBlockCount);
     }
 
     // Scale animation positions
@@ -262,8 +329,13 @@ bool ARE::upscale() {
 
     // Scale automap note positions
     for (auto& note : areFile.automapNotes) {
-        note.x = static_cast<uint16_t>(note.x * scaleFactor);
-        note.y = static_cast<uint16_t>(note.y * scaleFactor);
+        if (PIE4K_CFG.GameType == "pst") {
+            note.pst.x = static_cast<uint32_t>(note.pst.x * scaleFactor);
+            note.pst.y = static_cast<uint32_t>(note.pst.y * scaleFactor);
+        } else {
+            note.standard.x = static_cast<uint16_t>(note.standard.x * scaleFactor);
+            note.standard.y = static_cast<uint16_t>(note.standard.y * scaleFactor);
+        }
     }
 
     // Scale projectile trap positions
@@ -273,10 +345,111 @@ bool ARE::upscale() {
         trap.z = static_cast<uint16_t>(trap.z * scaleFactor);
     }
 
-    // Scale vertices
-    for (auto& vertex : areFile.vertices) {
-        vertex.x = static_cast<int16_t>(vertex.x * scaleFactor);
-        vertex.y = static_cast<int16_t>(vertex.y * scaleFactor);
+    // Expand and scale vertices (including impeded cells)
+    uint32_t expansionFactor = static_cast<uint32_t>(scaleFactor * scaleFactor);
+    std::vector<AREVertex> newVertices;
+    newVertices.reserve(areFile.vertices.size() * expansionFactor);
+    
+    // Track which vertices are impeded cells for doors and calculate new indices
+    std::map<uint32_t, uint32_t> oldToNewIndexMap; // Map old vertex index to new start index
+    
+    // Process each original vertex and build index mapping
+    size_t impededCount = 0;
+    size_t regularCount = 0;
+    for (size_t vertexIdx = 0; vertexIdx < areFile.vertices.size(); vertexIdx++) {
+        const auto& origVertex = areFile.vertices[vertexIdx];
+
+        // Record where this original vertex starts in the new array
+        oldToNewIndexMap[vertexIdx] = newVertices.size();
+
+        // Check if this vertex is part of door impeded cells
+        bool isImpededCell = false;
+        for (const auto& range : doorImpededRanges) {
+            if (vertexIdx >= range.first && vertexIdx < range.first + range.second) {
+                isImpededCell = true;
+                break;
+            }
+        }
+
+        if (isImpededCell) {
+            impededCount++;
+            // Expand impeded cell vertex to fill upscaled grid
+            for (uint32_t dy = 0; dy < static_cast<uint32_t>(scaleFactor); dy++) {
+                for (uint32_t dx = 0; dx < static_cast<uint32_t>(scaleFactor); dx++) {
+                    AREVertex newVertex;
+                    newVertex.x = static_cast<int16_t>(origVertex.x * scaleFactor + dx);
+                    newVertex.y = static_cast<int16_t>(origVertex.y * scaleFactor + dy);
+                    newVertices.push_back(newVertex);
+                }
+            }
+        } else {
+            regularCount++;
+            // Regular vertex - just scale coordinates
+            AREVertex newVertex;
+            newVertex.x = static_cast<int16_t>(origVertex.x * scaleFactor);
+            newVertex.y = static_cast<int16_t>(origVertex.y * scaleFactor);
+            newVertices.push_back(newVertex);
+        }
+    }
+
+    Log(DEBUG, "ARE", "Vertex classification: {} impeded, {} regular, {} total",
+        impededCount, regularCount, areFile.vertices.size());
+    
+    // Update all vertex indices to point to correct locations in new vertex array
+    for (auto& door : areFile.doors) {
+        if (door.openImpededCellBlockCount > 0) {
+            uint32_t oldIndex = door.openImpededCellBlockIndex;
+            door.openImpededCellBlockIndex = oldToNewIndexMap[oldIndex];
+            Log(DEBUG, "ARE", "Door open impeded index updated: {} -> {}", oldIndex, door.openImpededCellBlockIndex);
+        }
+        if (door.closedImpededCellBlockCount > 0) {
+            uint32_t oldIndex = door.closedImpededCellBlockIndex;
+            door.closedImpededCellBlockIndex = oldToNewIndexMap[oldIndex];
+            Log(DEBUG, "ARE", "Door closed impeded index updated: {} -> {}", oldIndex, door.closedImpededCellBlockIndex);
+        }
+        if (door.openVerticesCount > 0) {
+            uint32_t oldIndex = door.openVerticesIndex;
+            door.openVerticesIndex = oldToNewIndexMap[oldIndex];
+            Log(DEBUG, "ARE", "Door open vertices index updated: {} -> {}", oldIndex, door.openVerticesIndex);
+        }
+        if (door.closedVerticesCount > 0) {
+            uint32_t oldIndex = door.closedVerticesIndex;
+            door.closedVerticesIndex = oldToNewIndexMap[oldIndex];
+            Log(DEBUG, "ARE", "Door closed vertices index updated: {} -> {}", oldIndex, door.closedVerticesIndex);
+        }
+    }
+
+    // Update container vertex indices
+    for (auto& container : areFile.containers) {
+        if (container.verticesCount > 0) {
+            uint32_t oldIndex = container.verticesIndex;
+            container.verticesIndex = oldToNewIndexMap[oldIndex];
+            Log(DEBUG, "ARE", "Container vertices index updated: {} -> {}", oldIndex, container.verticesIndex);
+        }
+    }
+
+    // Update region vertex indices
+    for (auto& region : areFile.regions) {
+        if (region.verticesCount > 0) {
+            uint32_t oldIndex = region.verticesIndex;
+            region.verticesIndex = oldToNewIndexMap[oldIndex];
+            Log(DEBUG, "ARE", "Region vertices index updated: {} -> {}", oldIndex, region.verticesIndex);
+        }
+    }
+    
+    Log(DEBUG, "ARE", "Expanded vertices: {} -> {} (impeded cells expanded {}x)",
+        areFile.vertices.size(), newVertices.size(), expansionFactor);
+
+    areFile.vertices = std::move(newVertices);
+
+    // Update header with correct vertices count and reset offset
+    areFile.header.verticesCount = areFile.vertices.size();
+    areFile.header.verticesOffset = 0; // Will be set correctly by serialize()
+
+    // Force vertex offset to 0 if no vertices
+    if (areFile.vertices.empty()) {
+        areFile.header.verticesOffset = 0;
+        areFile.header.verticesCount = 0;
     }
 
     // Save upscaled file
@@ -287,7 +460,10 @@ bool ARE::upscale() {
     }
 
     std::string upscaledPath = upscaledDir + "/" + resourceName_ + originalExtension;
-    
+
+    Log(DEBUG, "ARE", "Before saveToFile - areFile header vertices: offset={}, count={}",
+        areFile.header.verticesOffset, areFile.header.verticesCount);
+
     if (!saveToFile(upscaledPath)) {
         Log(ERROR, "ARE", "Failed to save upscaled ARE file to: {}", upscaledPath);
         return false;
@@ -297,7 +473,7 @@ bool ARE::upscale() {
     return true;
 }
 
-bool ARE::saveToFile(const std::string& filePath) const {
+bool ARE::saveToFile(const std::string& filePath) {
     if (!valid_) {
         Log(ERROR, "ARE", "ARE data is not valid, cannot save.");
         return false;
@@ -325,9 +501,9 @@ bool ARE::saveToFile(const std::string& filePath) const {
     Log(DEBUG, "ARE", "  Explored Bitmask Size: {}", areFile.exploredBitmask.size());
 
     std::vector<uint8_t> data = areFile.serialize();
-    
+
     Log(DEBUG, "ARE", "Serialized data size: {} bytes", data.size());
-    
+
     std::ofstream file(filePath, std::ios::binary);
     if (!file.is_open()) {
         Log(ERROR, "ARE", "Could not create file: {}", filePath);
@@ -335,12 +511,25 @@ bool ARE::saveToFile(const std::string& filePath) const {
     }
     
     file.write(reinterpret_cast<const char*>(data.data()), data.size());
-    
+
     if (file.fail()) {
         Log(ERROR, "ARE", "Failed to write file: {}", filePath);
         return false;
     }
-    
+
+    // Debug: Read back the header from the file to verify it was written correctly
+    file.close();
+    // std::ifstream checkFile(filePath, std::ios::binary);
+    // if (checkFile.is_open()) {
+    //     char headerBytes[sizeof(AREHeader)];
+    //     checkFile.read(headerBytes, sizeof(AREHeader));
+    //     AREHeader fileHeader;
+    //     std::memcpy(&fileHeader, headerBytes, sizeof(AREHeader));
+    //     Log(DEBUG, "ARE", "Header written to file - vertices: offset={}, count={}",
+    //         fileHeader.verticesOffset, fileHeader.verticesCount);
+    //     checkFile.close();
+    // }
+
     Log(MESSAGE, "ARE", "Successfully saved ARE file to: {} ({} bytes)", filePath, data.size());
     return true;
 }
