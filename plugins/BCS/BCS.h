@@ -3,14 +3,19 @@
 
 #include <string>
 #include <vector>
+#include <map>
+#include <memory>
 
 #include "core/SClassID.h"
+#include "core/CFG.h"
 #include "plugins/PluginBase.h"
 #include "plugins/CommandRegistry.h"
+#include "BcsDecompiler.h"
+#include "BCSCompiler.h"
 
 namespace ProjectIE4k {
 
-// BCS Object structure (matches the IESDP specification)
+// BCS Object structure (matches Near Infinity specification)
 struct BCSObject {
     int ea;           // Enemy-Ally field
     int faction;      // Faction (PST only)
@@ -21,12 +26,14 @@ struct BCSObject {
     int specific;     // Specific type
     int gender;       // Gender
     int alignment;    // Alignment
-    int identifiers;  // Object identifiers
+    int subrace;      // Subrace (IWD2 only)
+    int identifiers[5]; // Object identifiers array (OBJECT.IDS)
     int area[4];      // Area coordinates (IWD/IWD2)
     std::string name; // Object name
-    
-    BCSObject() : ea(0), faction(0), team(0), general(0), race(0), class_(0), 
-                  specific(0), gender(0), alignment(0), identifiers(0) {
+
+    BCSObject() : ea(0), faction(0), team(0), general(0), race(0), class_(0),
+                  specific(0), gender(0), alignment(0), subrace(0) {
+        for (int i = 0; i < 5; i++) identifiers[i] = 0;
         for (int i = 0; i < 4; i++) area[i] = -1;
     }
 };
@@ -57,7 +64,43 @@ struct BCSAction {
     std::string var1;     // First string parameter
     std::string var2;     // Second string parameter
     
-    BCSAction() : opcode(-1), param1(0), param2(0), param3(0), param4(0), param5(0) {}
+    // ActionOverride support: for functions that take actions as parameters
+    bool hasNestedAction;
+    std::unique_ptr<BCSAction> nestedAction;
+    
+    BCSAction() : opcode(-1), param1(0), param2(0), param3(0), param4(0), param5(0), hasNestedAction(false) {}
+    
+    // Copy constructor and assignment operator for proper handling of unique_ptr
+    BCSAction(const BCSAction& other)
+        : opcode(other.opcode), param1(other.param1), param2(other.param2), param3(other.param3),
+          param4(other.param4), param5(other.param5), var1(other.var1), var2(other.var2),
+          hasNestedAction(other.hasNestedAction) {
+        for (int i = 0; i < 3; ++i) obj[i] = other.obj[i];
+        if (other.nestedAction) {
+            nestedAction = std::make_unique<BCSAction>(*other.nestedAction);
+        }
+    }
+    
+    BCSAction& operator=(const BCSAction& other) {
+        if (this != &other) {
+            opcode = other.opcode;
+            param1 = other.param1;
+            param2 = other.param2;
+            param3 = other.param3;
+            param4 = other.param4;
+            param5 = other.param5;
+            var1 = other.var1;
+            var2 = other.var2;
+            hasNestedAction = other.hasNestedAction;
+            for (int i = 0; i < 3; ++i) obj[i] = other.obj[i];
+            if (other.nestedAction) {
+                nestedAction = std::make_unique<BCSAction>(*other.nestedAction);
+            } else {
+                nestedAction.reset();
+            }
+        }
+        return *this;
+    }
 };
 
 // BCS Response structure
@@ -107,41 +150,21 @@ public:
     std::string getExtractDir(bool ensureDir = true) const override;
     std::string getUpscaledDir(bool ensureDir = true) const override;
     std::string getAssembleDir(bool ensureDir = true) const override;
+    
+    // Shared resource management
+    bool initializeSharedResources() override;
+    void cleanupSharedResources() override;
+    bool hasSharedResources() const override { return true; }
 
 private:
-    // BCS data structures
-    struct BCSObject {
-        int ea, faction, team, general, race, class_, specific, gender, alignment, identifiers;
-        int area[4];
-        std::string name;
-    };
-
-    struct BCSTrigger {
-        int opcode, param1, param2, param3, flags;
-        std::string var1, var2;
-        BCSObject object;
-    };
-
-    struct BCSAction {
-        int opcode, param1, param2, param3, param4, param5;
-        std::string var1, var2;
-        BCSObject obj[3];
-    };
-
-    struct BCSResponse {
-        int weight;
-        std::vector<BCSAction> actions;
-    };
-
-    struct BCSBlock {
-        std::vector<BCSTrigger> triggers;
-        std::vector<BCSResponse> responses;
-    };
-
     std::vector<BCSBlock> blocks;
 
-    // Universal IDS lookup system (like dltcep)
-    std::map<std::string, std::map<int, std::string>> idsMaps; // Map<IDSFileName, Map<IDValue, IDName>>
+    // Near Infinity-style decompiler
+    std::unique_ptr<BcsDecompiler> decompiler_;
+    std::unique_ptr<BCSCompiler> compiler_;
+    
+    /** Load all available IDS files dynamically */
+    bool loadIDSFiles();
 
     // Parsing methods
     bool parseScript();
@@ -156,38 +179,43 @@ private:
     bool readNumber(int& value, size_t& offset);
     bool readString(std::string& value, size_t& offset);
     bool readArea(int area[4], size_t& offset);
+
     bool skipWhitespace(size_t& offset);
     bool findNextBlock(size_t& offset);
 
     // Writing methods
     bool writeScriptToFile(const std::string& filename);
     bool writeBlock(std::ofstream& file, const BCSBlock& block);
+    bool writeBlockBinary(std::ofstream& file, const BCSBlock& block);
     bool writeTrigger(std::ofstream& file, const BCSTrigger& trigger);
+    bool writeTriggerBinary(std::ofstream& file, const BCSTrigger& trigger);
     bool writeAction(std::ofstream& file, const BCSAction& action);
+    bool writeActionBinary(std::ofstream& file, const BCSAction& action);
     bool writeResponse(std::ofstream& file, const BCSResponse& response);
+    bool writeResponseBinary(std::ofstream& file, const BCSResponse& response);
     bool writeObject(std::ofstream& file, const BCSObject& object);
+    bool writeObjectBinary(std::ofstream& file, const BCSObject& object);
     bool writeNumber(std::ofstream& file, int value);
     bool writeString(std::ofstream& file, const std::string& value);
     bool writeArea(std::ofstream& file, const int area[4]);
 
     // Decompilation methods
     bool decompileToText(const std::string& filename);
-    std::string decompileTrigger(const BCSTrigger& trigger);
-    std::string decompileAction(const BCSAction& action);
-    std::string decompileResponse(const BCSResponse& response);
-    std::string decompileObject(const BCSObject& object);
 
-    // Universal IDS lookup methods (like dltcep)
-    bool loadIDSFiles();
-    bool loadIDSFileFromResource(const std::string& resourceName);
-    std::string getIDSName(const std::string& idsFile, int value);
-    int getIDSValue(const std::string& idsFile, const std::string& name);
-
+    // Compilation methods
+    bool compileTextToBinary(const std::string& textContent);
+    
     // Upscaling methods
     void upscaleLine(std::string& line, int upscaleFactor);
     bool applyUpscaledCoordinates(const std::string& filename);
     void applyCoordinatesToAction(BCSAction& action, const std::string& line);
 
+    // Lazy initialization
+    bool ensureDecompilerInitialized();
+    bool decompilerInitialized_ = false;
+    bool ensureCompilerInitialized();
+    bool compilerInitialized_ = false;
+    
     // Directory helpers
     bool cleanDirectory(const std::string& dir);
 };

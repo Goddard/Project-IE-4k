@@ -3,14 +3,12 @@
 #include <filesystem>
 #include <iostream>
 #include <fstream>
-#include <sstream>
 #include <cctype>
 
 #include "core/Logging/Logging.h"
-#include "services/ServiceManager.h"
 #include "core/CFG.h"
 #include "plugins/CommandRegistry.h"
-#include "services/ResourceService/ResourceTypes.h"
+#include "IdsMapCache.h"
 
 namespace ProjectIE4k {
 
@@ -31,20 +29,19 @@ BCS::~BCS() {
     blocks.clear();
     blocks.shrink_to_fit();
     
-    // Clean up the nested map structure
-    idsMaps.clear();
+    // Cleanup handled by smart pointers
 }
 
 bool BCS::loadFromData() {
-    if (originalFileData.empty()) {
-        Log(ERROR, "BCS", "No BCS data loaded");
-        return false;
-    }
+    // Some BCS files are actually empty
+    // if (originalFileData.empty()) {
+    //     Log(ERROR, "BCS", "No BCS data loaded");
+    //     return false;
+    // }
 
-    // Load IDS files for human-readable names
-    if (!loadIDSFiles()) {
-        Log(WARNING, "BCS", "Failed to load IDS files, using generic names");
-    }
+    // Create decompiler but don't initialize it yet (lazy initialization)
+    decompiler_ = std::make_unique<BcsDecompiler>();
+
 
     // Parse the BCS script data
     if (!parseScript()) {
@@ -64,14 +61,34 @@ bool BCS::extract() {
     }
 
     std::string extractDir = getExtractDir(true);
-    std::string filename = extractDir + "/" + resourceName_ + ".bcs.txt";
-    
-    if (!decompileToText(filename)) {
-        Log(ERROR, "BCS", "Failed to decompile BCS to text file: {}", filename);
+
+    // Save decompiled BAF file
+    std::string bafFilename = extractDir + "/" + resourceName_ + ".baf";
+    if (!decompileToText(bafFilename)) {
+        Log(ERROR, "BCS", "Failed to decompile BCS to text file: {}", bafFilename);
         return false;
     }
-    
-    Log(MESSAGE, "BCS", "Successfully extracted BCS to: {}", filename);
+
+    // Save original BCS data as .bcs file
+    std::string bcsFilename = extractDir + "/" + originalFileName;
+    std::ofstream bcsFile(bcsFilename, std::ios::binary);
+    if (!bcsFile) {
+        Log(ERROR, "BCS", "Failed to open BCS file for writing: {}", bcsFilename);
+        return false;
+    }
+
+    if (!originalFileData.empty()) {
+        bcsFile.write(reinterpret_cast<const char*>(originalFileData.data()), originalFileData.size());
+        if (!bcsFile) {
+            Log(ERROR, "BCS", "Failed to write BCS data to file: {}", bcsFilename);
+            return false;
+        }
+    } else {
+        Log(WARNING, "BCS", "No original BCS data available to save");
+    }
+    bcsFile.close();
+
+    Log(MESSAGE, "BCS", "Successfully extracted BCS to: {} and {}", bafFilename, bcsFilename);
     return true;
 }
 
@@ -90,49 +107,152 @@ bool BCS::upscale() {
 
     Log(DEBUG, "BCS", "Upscaling BCS coordinates by factor: {}", upscaleFactor);
 
-    // Read the decompiled text file
-    std::string extractDir = getExtractDir(false);
-    std::string inputFile = extractDir + "/" + resourceName_ + ".bcs.txt";
-    
-    std::ifstream file(inputFile);
-    if (!file.is_open()) {
-        Log(ERROR, "BCS", "Failed to open decompiled file for upscaling: {}", inputFile);
+    // Ensure decompiler is initialized before upscaling
+    if (!ensureDecompilerInitialized()) {
+        Log(ERROR, "BCS", "Failed to initialize decompiler for upscaling");
         return false;
     }
-
-    // Read all lines
-    std::vector<std::string> lines;
-    std::string line;
-    while (std::getline(file, line)) {
-        lines.push_back(line);
-    }
-    file.close();
-
-    // Process each line to upscale coordinates
-    for (auto& line : lines) {
-        upscaleLine(line, upscaleFactor);
-    }
-
-    // Write the upscaled text to the upscale directory
-    std::string upscaleDir = getUpscaledDir(true);
-    std::string outputFile = upscaleDir + "/" + resourceName_ + ".bcs.txt";
     
-    std::ofstream outFile(outputFile);
-    if (!outFile.is_open()) {
+    // Create upscale-enabled decompiler and decompile directly from original binary data
+    auto upscaleDecompiler = std::make_unique<BcsDecompiler>();
+    
+    if (!upscaleDecompiler->initialize()) {
+        Log(ERROR, "BCS", "Failed to initialize upscale decompiler");
+        return false;
+    }
+    
+    // Enable upscaling mode
+    upscaleDecompiler->setUpscaling(true, upscaleFactor);
+
+    // Decompile directly to upscaled output using the original binary data
+    std::string upscaleDir = getUpscaledDir(true);
+    std::string outputFile = upscaleDir + "/" + resourceName_ + ".baf";
+    
+    std::ofstream file(outputFile);
+    if (!file.is_open()) {
         Log(ERROR, "BCS", "Failed to open output file for upscaled BCS: {}", outputFile);
         return false;
     }
-
-    for (const auto& processedLine : lines) {
-        outFile << processedLine << "\n";
+    
+    
+    for (size_t i = 0; i < blocks.size(); i++) {
+        file << "IF\n";
+        
+        // Write triggers with upscaling
+        for (const auto& trigger : blocks[i].triggers) {
+            file << "  " << upscaleDecompiler->decompileTrigger(trigger) << "\n";
+        }
+        
+        file << "THEN\n";
+        
+        // Write responses with upscaling
+        for (const auto& response : blocks[i].responses) {
+            file << "  RESPONSE #" << response.weight << "\n";
+            for (const auto& action : response.actions) {
+                file << "    " << upscaleDecompiler->decompileAction(action) << "\n";
+            }
+            file << "\n";
+        }
+        
+        file << "END\n\n";
     }
-    outFile.close();
+    
+    file.close();
 
     Log(MESSAGE, "BCS", "Successfully upscaled BCS to: {}", outputFile);
+    
+    // Log upscaled file for tracking
+    Log(DEBUG, "BCS", "UPSCALED FILE: {} -> {}", resourceName_, outputFile);
+    
     return true;
 }
 
+bool BCS::assemble() {
+    if (!isValid()) {
+        Log(ERROR, "BCS", "BCS resource is not valid");
+        return false;
+    }
 
+    // Read the upscaled BCS text file
+    std::string upscaledDir = getUpscaledDir(false);
+    std::string inputFile = upscaledDir + "/" + resourceName_ + ".baf";
+    
+    if (!std::filesystem::exists(inputFile)) {
+        Log(ERROR, "BCS", "Upscaled BCS file not found: {}", inputFile);
+        return false;
+    }
+    
+    // Ensure decompiler is initialized (needed for compilation)
+    if (!ensureDecompilerInitialized()) {
+        Log(ERROR, "BCS", "Failed to initialize decompiler for assembly");
+        return false;
+    }
+    
+    // Read the text file content
+    std::ifstream file(inputFile);
+    if (!file.is_open()) {
+        Log(ERROR, "BCS", "Failed to open upscaled BCS file: {}", inputFile);
+        return false;
+    }
+    
+    std::string textContent;
+    std::string line;
+    while (std::getline(file, line)) {
+        textContent += line + "\n";
+    }
+    file.close();
+    
+    // Compile the text content to binary
+    if (!compileTextToBinary(textContent)) {
+        Log(ERROR, "BCS", "Failed to compile BCS text to binary");
+        return false;
+    }
+    
+    // Write compiled binary to assembled directory
+    std::string assembleDir = getAssembleDir(true);
+    std::string outputFile = assembleDir + "/" + originalFileName;
+    
+    if (!writeScriptToFile(outputFile)) {
+        Log(ERROR, "BCS", "Failed to write compiled BCS to file: {}", outputFile);
+        return false;
+    }
+    
+    Log(MESSAGE, "BCS", "Successfully compiled and assembled BCS to: {}", outputFile);
+    
+    return true;
+}
+
+bool BCS::compileTextToBinary(const std::string& textContent) {
+    // Ensure compiler is initialized
+    if (!ensureCompilerInitialized()) {
+        Log(ERROR, "BCS", "Failed to initialize compiler");
+        return false;
+    }
+    
+    // Clear existing blocks before compilation
+    blocks.clear();
+    
+    // Use the BCSCompiler to compile text to binary blocks
+    return compiler_->compileText(textContent, blocks);
+}
+
+bool BCS::ensureCompilerInitialized() {
+    if (!compiler_) {
+        compiler_ = std::make_unique<BCSCompiler>();
+    }
+    
+    if (!compilerInitialized_) {
+        if (compiler_->initialize()) {
+            compilerInitialized_ = true;
+            Log(DEBUG, "BCS", "Compiler initialized successfully");
+        } else {
+            Log(ERROR, "BCS", "Failed to initialize compiler");
+            return false;
+        }
+    }
+    
+    return true;
+}
 
 bool BCS::applyUpscaledCoordinates(const std::string& filename) {
     std::ifstream file(filename);
@@ -273,38 +393,37 @@ void BCS::upscaleLine(std::string& line, int upscaleFactor) {
     }
 }
 
-bool BCS::assemble() {
-    if (!isValid()) {
-        Log(ERROR, "BCS", "BCS resource is not valid");
+bool BCS::loadIDSFiles() {
+    // Get all available IDS files from our resource service
+    auto resources = PluginManager::getInstance().listResourcesByType(IE_IDS_CLASS_ID);
+    
+    if (resources.empty()) {
+        Log(WARNING, "BCS", "No IDS files found");
         return false;
     }
-
-    // Check if we have an upscaled text file to use
-    std::string upscaleDir = getUpscaledDir(false);
-    std::string upscaledTextFile = upscaleDir + "/" + resourceName_ + ".bcs.txt";
     
-    if (std::filesystem::exists(upscaledTextFile)) {
-        Log(DEBUG, "BCS", "Applying upscaled coordinates from: {}", upscaledTextFile);
+    Log(DEBUG, "BCS", "Found {} IDS files", resources.size());
+    
+    // Load each IDS file into a map
+    std::map<std::string, std::vector<uint8_t>> idsFiles;
+    for (const auto& resourceName : resources) {
+        Log(DEBUG, "BCS", "Loading IDS file: {}", resourceName);
         
-        // Read the upscaled text file to extract coordinates
-        if (!applyUpscaledCoordinates(upscaledTextFile)) {
-            Log(ERROR, "BCS", "Failed to apply upscaled coordinates");
-            return false;
+        auto data = loadResourceFromService(resourceName, IE_IDS_CLASS_ID);
+        if (!data.empty()) {
+            // Store by bare resource name; normalizeName() will add .IDS
+            idsFiles[resourceName] = data;
+        } else {
+            Log(WARNING, "BCS", "Failed to load IDS file: {}", resourceName);
         }
-    } else {
-        Log(DEBUG, "BCS", "No upscaled text file found, using original coordinates");
-    }
-
-    std::string assembleDir = getAssembleDir(true);
-    std::string filename = assembleDir + "/" + originalFileName;
-    
-    if (!writeScriptToFile(filename)) {
-        Log(ERROR, "BCS", "Failed to write BCS file: {}", filename);
-        return false;
     }
     
-    Log(MESSAGE, "BCS", "Successfully assembled BCS to: {}", filename);
-    return true;
+    // Initialize the IDS cache with all loaded files
+    IdsMapCache::initializeWithIdsFiles(idsFiles);
+    
+    Log(DEBUG, "BCS", "Loaded {} IDS files into cache", idsFiles.size());
+    
+    return !idsFiles.empty();
 }
 
 bool BCS::cleanExtractDirectory() {
@@ -370,8 +489,7 @@ void BCS::registerCommands(CommandTable& commandTable) {
                         std::cerr << "Usage: bcs extract <resource_name>" << std::endl;
                         return 1;
                     }
-                    BCS bcs(args[0]);
-                    return bcs.extract() ? 0 : 1;
+                    return PluginManager::getInstance().extractResource(args[0], IE_BCS_CLASS_ID) ? 0 : 1;
                 }
             }},
             {"upscale", {"Upscale bcs coordinates (e.g., bcs upscale mainmenu)",
@@ -380,8 +498,7 @@ void BCS::registerCommands(CommandTable& commandTable) {
                         std::cerr << "Usage: bcs upscale <resource_name>" << std::endl;
                         return 1;
                     }
-                    BCS bcs(args[0]);
-                    return bcs.upscale() ? 0 : 1;
+                    return PluginManager::getInstance().upscaleResource(args[0], IE_BCS_CLASS_ID) ? 0 : 1;
                 }
             }},
             {"assemble", {"Assemble bcs files (e.g., bcs assemble mainmenu)",
@@ -390,8 +507,7 @@ void BCS::registerCommands(CommandTable& commandTable) {
                         std::cerr << "Usage: bcs assemble <resource_name>" << std::endl;
                         return 1;
                     }
-                    BCS bcs(args[0]);
-                    return bcs.assemble() ? 0 : 1;
+                    return PluginManager::getInstance().assembleResource(args[0], IE_BCS_CLASS_ID) ? 0 : 1;
                 }
             }}
         }
@@ -455,14 +571,23 @@ bool BCS::parseBlock(BCSBlock& block, size_t& offset) {
         return false;
     }
     
-    // Parse triggers
+    // Parse triggers (tolerant scanning like Near Infinity)
     while (offset < originalFileData.size()) {
-        BCSTrigger trigger;
-        if (!parseTrigger(trigger, offset)) {
-            Log(DEBUG, "BCS", "End of triggers at offset {}", offset);
-            break; // End of triggers
+        // Stop when we encounter the end of condition block
+        size_t save = offset;
+        if (readToken("CO", save)) {
+            // Reached end of triggers; do not consume here
+            break;
         }
-        block.triggers.push_back(trigger);
+        // Try to parse a trigger at current offset
+        BCSTrigger trigger;
+        size_t before = offset;
+        if (parseTrigger(trigger, offset)) {
+            block.triggers.push_back(trigger);
+            continue;
+        }
+        // No trigger here; advance by one byte and continue scanning
+        offset = before + 1;
     }
     
     // Read CO token (condition end)
@@ -480,14 +605,23 @@ bool BCS::parseBlock(BCSBlock& block, size_t& offset) {
         return false;
     }
     
-    // Parse responses
+    // Parse responses (tolerant scanning like Near Infinity)
     while (offset < originalFileData.size()) {
-        BCSResponse response;
-        if (!parseResponse(response, offset)) {
-            Log(DEBUG, "BCS", "End of responses at offset {}", offset);
-            break; // End of responses
+        // Stop when we encounter the end of response set
+        size_t save = offset;
+        if (readToken("RS", save)) {
+            // Reached end of responses; do not consume here
+            break;
         }
-        block.responses.push_back(response);
+        // Try to parse a response at current offset
+        BCSResponse response;
+        size_t before = offset;
+        if (parseResponse(response, offset)) {
+            block.responses.push_back(response);
+            continue;
+        }
+        // No response here; advance by one byte and continue scanning
+        offset = before + 1;
     }
     
     // Read RS token (response end)
@@ -508,32 +642,76 @@ bool BCS::parseTrigger(BCSTrigger& trigger, size_t& offset) {
     if (!readToken("TR", offset)) {
         return false; // End of triggers
     }
-    
-    // Read opcode
-    if (!readNumber(trigger.opcode, offset)) {
-        Log(ERROR, "BCS", "Failed to read trigger opcode");
-        return false;
+
+    // Near Infinity-style tolerant parsing: consume params until closing TR
+    int cntNums = 0;
+    int cntStrings = 0;
+    bool haveObject = false;
+
+    while (offset < originalFileData.size()) {
+        // Check for end of trigger (peek without consuming)
+        size_t save = offset;
+        if (readToken("TR", save)) {
+            offset = save; // consume end token
+            break;
+        }
+
+        // Determine next param type
+        char ch = 0;
+        unsigned char c = static_cast<unsigned char>(originalFileData[offset]);
+        if (c == 'O') {
+            // Possible OB token
+            size_t t = offset;
+            if (readToken("OB", t)) {
+                ch = 'O';
+            }
+        }
+        if (ch == 0) {
+            if (c == '"') ch = 'S';
+            else if (c == '-' || (c >= '0' && c <= '9')) ch = 'I';
+        }
+
+        switch (ch) {
+            case 'I': {
+                int n;
+                if (!readNumber(n, offset)) return false;
+                switch (cntNums) {
+                    case 0: trigger.opcode = n; break;
+                    case 1: trigger.param1 = n; break;
+                    case 2: trigger.flags = n; break;
+                    case 3: trigger.param2 = n; break;
+                    case 4: trigger.param3 = n; break;
+                    default: break;
+                }
+                cntNums++;
+                break;
+            }
+            case 'S': {
+                std::string s;
+                if (!readString(s, offset)) return false;
+                if (cntStrings == 0) trigger.var1 = s;
+                else if (cntStrings == 1) trigger.var2 = s;
+                cntStrings++;
+                break;
+            }
+            case 'O': {
+                if (!haveObject) {
+                    if (!parseObject(trigger.object, offset)) return false;
+                    haveObject = true;
+                } else {
+                    // Extra object, parse and ignore
+                    BCSObject dummy;
+                    if (!parseObject(dummy, offset)) return false;
+                }
+                break;
+            }
+            default:
+                // Unknown token; advance one byte
+                offset++;
+                break;
+        }
     }
-    
-    // Read parameters
-    if (!readNumber(trigger.param1, offset)) return false;
-    if (!readNumber(trigger.flags, offset)) return false;
-    if (!readNumber(trigger.param2, offset)) return false;
-    if (!readNumber(trigger.param3, offset)) return false;
-    
-    // Read strings
-    if (!readString(trigger.var1, offset)) return false;
-    if (!readString(trigger.var2, offset)) return false;
-    
-    // Read object
-    if (!parseObject(trigger.object, offset)) return false;
-    
-    // Read TR token (trigger end)
-    if (!readToken("TR", offset)) {
-        Log(ERROR, "BCS", "Expected 'TR' at end of trigger at offset {}", offset);
-        return false;
-    }
-    
+
     return true;
 }
 
@@ -542,35 +720,85 @@ bool BCS::parseAction(BCSAction& action, size_t& offset) {
     if (!readToken("AC", offset)) {
         return false; // End of actions
     }
-    
-    // Read opcode
-    if (!readNumber(action.opcode, offset)) {
-        Log(ERROR, "BCS", "Failed to read action opcode");
-        return false;
+
+    // Near Infinity-style tolerant parsing: consume params until closing AC
+    int cntNums = 0;
+    int cntStrings = 0;
+    int cntObjects = 0;
+
+    while (offset < originalFileData.size()) {
+        // Check for end of action (peek without consuming)
+        size_t save = offset;
+        if (readToken("AC", save)) {
+            offset = save; // consume end token
+            break;
+        }
+
+        // Determine next param type
+        char ch = 0;
+        unsigned char c = static_cast<unsigned char>(originalFileData[offset]);
+        if (c == 'O') {
+            size_t t = offset;
+            if (readToken("OB", t)) {
+                ch = 'O';
+            }
+        }
+        if (ch == 0) {
+            if (c == '"') ch = 'S';
+            else if (c == '[') ch = 'P';
+            else if (c == '-' || (c >= '0' && c <= '9')) ch = 'I';
+        }
+
+        switch (ch) {
+            case 'I': {
+                int n;
+                if (!readNumber(n, offset)) return false;
+                switch (cntNums) {
+                    case 0: action.opcode = n; break;     // id
+                    case 1: action.param1 = n; break;     // a4 (first integer)
+                    case 2: action.param2 = n; break;     // a5.x (point X)
+                    case 3: action.param3 = n; break;     // a5.y (point Y)  
+                    case 4: action.param4 = n; break;     // a6 (second integer)
+                    case 5: action.param5 = n; break;     // a7 (third integer)
+                    default: break;
+                }
+                cntNums++;
+                break;
+            }
+            case 'S': {
+                std::string s;
+                if (!readString(s, offset)) return false;
+                if (cntStrings == 0) action.var1 = s;
+                else if (cntStrings == 1) action.var2 = s;
+                cntStrings++;
+                break;
+            }
+            case 'O': {
+                if (cntObjects < 3) {
+                    if (!parseObject(action.obj[cntObjects], offset)) {
+                        return false;
+                    }
+                    cntObjects++;
+                } else {
+                    // Skip extra object silently
+                    BCSObject dummy;
+                    if (!parseObject(dummy, offset)) return false;
+                }
+                break;
+            }
+            case 'P': {
+                // Points are stored as separate integers, not [x.y] format
+                // This case should not occur in binary parsing - points are parsed as integers
+                Log(ERROR, "BCS", "Unexpected point format in binary at offset {}", offset);
+                return false;
+            }
+            default:
+                // Unknown token; advance one byte
+                offset++;
+                break;
+        }
     }
-    
-    // Read objects
-    for (int i = 0; i < 3; i++) {
-        if (!parseObject(action.obj[i], offset)) return false;
-    }
-    
-    // Read parameters
-    if (!readNumber(action.param1, offset)) return false;
-    if (!readNumber(action.param2, offset)) return false;
-    if (!readNumber(action.param3, offset)) return false;
-    if (!readNumber(action.param4, offset)) return false;
-    if (!readNumber(action.param5, offset)) return false;
-    
-    // Read strings
-    if (!readString(action.var1, offset)) return false;
-    if (!readString(action.var2, offset)) return false;
-    
-    // Read AC token (action end)
-    if (!readToken("AC", offset)) {
-        Log(ERROR, "BCS", "Expected 'AC' at end of action at offset {}", offset);
-        return false;
-    }
-    
+
     return true;
 }
 
@@ -579,28 +807,29 @@ bool BCS::parseResponse(BCSResponse& response, size_t& offset) {
     if (!readToken("RE", offset)) {
         return false; // End of responses
     }
-    
+
     // Read weight
     if (!readNumber(response.weight, offset)) {
         Log(ERROR, "BCS", "Failed to read response weight");
         return false;
     }
-    
-    // Parse actions
+
+    // Parse actions until closing RE
     while (offset < originalFileData.size()) {
-        BCSAction action;
-        if (!parseAction(action, offset)) {
-            break; // End of actions
+        size_t save = offset;
+        if (readToken("RE", save)) {
+            offset = save; // consume
+            break;
         }
-        response.actions.push_back(action);
+        BCSAction action;
+        if (parseAction(action, offset)) {
+            response.actions.push_back(action);
+        } else {
+            // Advance by one byte and keep scanning
+            offset++;
+        }
     }
-    
-    // Read RE token (response end)
-    if (!readToken("RE", offset)) {
-        Log(ERROR, "BCS", "Expected 'RE' at end of response");
-        return false;
-    }
-    
+
     return true;
 }
 
@@ -611,7 +840,7 @@ bool BCS::parseObject(BCSObject& object, size_t& offset) {
         return false;
     }
     
-    // Initialize object fields to defaults
+    // Initialize object fields to defaults (Near Infinity approach)
     object.ea = 0;
     object.faction = 0;
     object.team = 0;
@@ -621,44 +850,79 @@ bool BCS::parseObject(BCSObject& object, size_t& offset) {
     object.specific = 0;
     object.gender = 0;
     object.alignment = 0;
-    object.identifiers = 0;
+    for (int i = 0; i < 5; i++) object.identifiers[i] = 0;
     object.area[0] = object.area[1] = object.area[2] = object.area[3] = 0;
     object.name.clear();
     
-    // Try to read object fields - be flexible about the number
-    int fieldCount = 0;
-    int tempValue;
+    // Near Infinity approach: read parameters until closing OB
+    int cntNums = 0;
     
-    // Read numeric fields until we can't anymore
-    while (fieldCount < 20 && readNumber(tempValue, offset)) {
-        switch (fieldCount) {
-            case 0: object.ea = tempValue; break;
-            case 1: object.faction = tempValue; break;
-            case 2: object.team = tempValue; break;
-            case 3: object.general = tempValue; break;
-            case 4: object.race = tempValue; break;
-            case 5: object.class_ = tempValue; break;
-            case 6: object.specific = tempValue; break;
-            case 7: object.gender = tempValue; break;
-            case 8: object.alignment = tempValue; break;
-            case 9: object.identifiers = tempValue; break;
-            case 10: object.area[0] = tempValue; break;
-            case 11: object.area[1] = tempValue; break;
-            case 12: object.area[2] = tempValue; break;
-            case 13: object.area[3] = tempValue; break;
-            default: break; // Ignore extra fields
+    while (offset < originalFileData.size()) {
+        // Check for end of object (peek without consuming)
+        size_t save = offset;
+        if (readToken("OB", save)) {
+            offset = save; // consume end token
+            break;
         }
-        fieldCount++;
+        
+        // Determine parameter type
+        char ch = 0;
+        unsigned char c = static_cast<unsigned char>(originalFileData[offset]);
+        if (c == '"') {
+            ch = 'S';
+        } else if (c == '[') {
+            ch = 'P'; // rectangle
+        } else if (c == '-' || (c >= '0' && c <= '9')) {
+            ch = 'I';
+        } else {
+            // Unknown character, advance and continue
+            offset++;
+            continue;
+        }
+        
+        switch (ch) {
+            case 'I': {
+                int n;
+                if (readNumber(n, offset)) {
+                    // Near Infinity BG format: T0:T3:T4:T5:T6:T7:T8:I0:I1:I2:I3:I4
+                    // BG skips T1 (faction) and T2 (team), so we map accordingly
+                    switch (cntNums) {
+                        case 0: object.ea = n; break;        // T0 (EA)
+                        case 1: object.general = n; break;   // T3 (General)
+                        case 2: object.race = n; break;      // T4 (Race)
+                        case 3: object.class_ = n; break;    // T5 (Class)
+                        case 4: object.specific = n; break;  // T6 (Specific)
+                        case 5: object.gender = n; break;    // T7 (Gender)
+                        case 6: object.alignment = n; break; // T8 (Alignment)
+                        case 7: case 8: case 9: case 10: case 11: // I0-I4 (Identifiers)
+                            if (cntNums - 7 < 5) {
+                                object.identifiers[cntNums - 7] = n;
+                            }
+                            break;
+                    }
+                    cntNums++;
+                }
+                break;
+            }
+            case 'S': {
+                std::string s;
+                if (readString(s, offset)) {
+                    object.name = s;
+                }
+                break;
+            }
+            case 'P': {
+                int area[4];
+                if (readArea(area, offset)) {
+                    for (int i = 0; i < 4; i++) {
+                        object.area[i] = area[i];
+                    }
+                }
+                break;
+            }
+        }
     }
-    
-    // Try to read name string
-    readString(object.name, offset);
-    
-    // Look for OB token to end object
-    if (!readToken("OB", offset)) {
-        Log(WARNING, "BCS", "Expected 'OB' at end of object, but continuing anyway");
-    }
-    
+
     return true;
 }
 
@@ -771,6 +1035,8 @@ bool BCS::readArea(int area[4], size_t& offset) {
     return true;
 }
 
+
+
 bool BCS::skipWhitespace(size_t& offset) {
     while (offset < originalFileData.size() && 
            (static_cast<char>(originalFileData[offset]) == ' ' || 
@@ -801,6 +1067,9 @@ bool BCS::writeScriptToFile(const std::string& filename) {
         return false;
     }
     
+    // For now, use the existing text-based format to avoid compilation issues
+    // TODO: Implement proper binary format using BCSCompiler bytecode generation
+    
     // Write SC token
     file << "SC\n";
     
@@ -817,6 +1086,8 @@ bool BCS::writeScriptToFile(const std::string& filename) {
     
     return true;
 }
+
+
 
 bool BCS::writeBlock(std::ofstream& file, const BCSBlock& block) {
     file << "CR\n";
@@ -846,14 +1117,58 @@ bool BCS::writeBlock(std::ofstream& file, const BCSBlock& block) {
 }
 
 bool BCS::writeTrigger(std::ofstream& file, const BCSTrigger& trigger) {
+    Log(DEBUG, "BCS", "writeTrigger called for opcode={}, param1={}", trigger.opcode, trigger.param1);
+
     file << "TR\n";
-    file << trigger.opcode << " " << trigger.param1 << " " << trigger.flags << " " 
-         << trigger.param2 << " " << trigger.param3 << " \"" << trigger.var1 << "\" \"" 
+
+    // Follow Near Infinity's actual implementation exactly
+    file << trigger.opcode << " "
+         << trigger.param1 << " "
+         << trigger.flags << " "
+         << trigger.param2 << " "
+         << trigger.param3 << " \"" << trigger.var1 << "\" \""
          << trigger.var2 << "\" OB\n";
     
-    // Write trigger object (simplified format)
-    file << "0 0 0 0 0 0 0 0 0 0 0 0 \"\"OB\n";
-    
+
+    Log(DEBUG, "BCS", "Writing trigger opcode={}: ea={}, general={}", trigger.opcode, trigger.object.ea, trigger.object.general);
+
+    // Write trigger object content following game-specific parse code without leading OB token line
+    std::string gameType = PIE4K_CFG.GameType;
+
+    if (gameType == "pst") {
+        // PST: "T0:T1:T2:T3:T4:T5:T6:T7:T8:I0:I1:I2:I3:I4:R0:S0"
+        file << trigger.object.ea << " " << trigger.object.faction << " " << trigger.object.team << " "
+             << trigger.object.general << " " << trigger.object.race << " " << trigger.object.class_ << " "
+             << trigger.object.specific << " " << trigger.object.gender << " " << trigger.object.alignment << " ";
+        for (int j = 0; j < 5; j++) file << trigger.object.identifiers[j] << " ";
+        file << "[0,0,0,0] "; // rectangle (region) - placeholder
+        file << "\"" << trigger.object.name << "\"OB\n";
+    } else if (gameType == "iwd") {
+        // IWD: "T0:T3:T4:T5:T6:T7:T8:I0:I1:I2:I3:I4:R0:S0"
+        file << trigger.object.ea << " " << trigger.object.general << " " << trigger.object.race << " "
+             << trigger.object.class_ << " " << trigger.object.specific << " " << trigger.object.gender << " "
+             << trigger.object.alignment << " ";
+        for (int j = 0; j < 5; j++) file << trigger.object.identifiers[j] << " ";
+        file << "[0,0,0,0] "; // rectangle (region) - placeholder
+        file << "\"" << trigger.object.name << "\"OB\n";
+    } else if (gameType == "iwd2") {
+        // IWD2: "T0:T3:T4:T5:T6:T7:T8:T9:I0:I1:I2:I3:I4:R0:S0:TA:TB"
+        file << trigger.object.ea << " " << trigger.object.general << " " << trigger.object.race << " "
+             << trigger.object.class_ << " " << trigger.object.specific << " " << trigger.object.gender << " "
+             << trigger.object.alignment << " " << trigger.object.subrace << " ";
+        for (int j = 0; j < 5; j++) file << trigger.object.identifiers[j] << " ";
+        file << "[0,0,0,0] "; // rectangle (region) - placeholder
+        file << "\"" << trigger.object.name << "\" 0 0"; // extra TA:TB parameters
+        file << "OB\n";
+    } else {
+        // BG (default): "T0:T3:T4:T5:T6:T7:T8:I0:I1:I2:I3:I4:S0"
+        file << trigger.object.ea << " " << trigger.object.general << " " << trigger.object.race << " "
+             << trigger.object.class_ << " " << trigger.object.specific << " " << trigger.object.gender << " "
+             << trigger.object.alignment << " ";
+        for (int j = 0; j < 5; j++) file << trigger.object.identifiers[j] << " ";
+        file << "\"" << trigger.object.name << "\"OB\n";
+    }
+
     file << "TR\n";
     
     return true;
@@ -861,30 +1176,72 @@ bool BCS::writeTrigger(std::ofstream& file, const BCSTrigger& trigger) {
 
 bool BCS::writeAction(std::ofstream& file, const BCSAction& action) {
     file << "AC\n";
-    file << action.opcode << "OB\n";
-    
-    // Write first object (no extra OB prefix)
-    file << action.obj[0].ea << " " << action.obj[0].faction << " " << action.obj[0].team << " "
-         << action.obj[0].general << " " << action.obj[0].race << " " << action.obj[0].class_ << " "
-         << action.obj[0].specific << " " << action.obj[0].gender << " " << action.obj[0].alignment << " "
-         << action.obj[0].identifiers << " " << action.obj[0].area[0] << " " << action.obj[0].area[1] << " "
-         << "\"" << action.obj[0].name << "\"OB\n";
-    
-    // Write second and third objects (with OB prefix)
-    for (int i = 1; i < 3; i++) {
+    file << action.opcode;
+
+    auto writeObjLine = [&](const BCSObject& o, bool isFirst = false) {
+        if (isFirst) {
+            file << "OB\n";  // First object gets OB on same line as opcode
+        } else {
+            file << "OB\n";  // Subsequent objects get OB on new line
+        }
+        // Game-specific object format based on Near Infinity parse codes
+        std::string gameType = PIE4K_CFG.GameType;
+
+        if (gameType == "pst") {
+            // PST: "T0:T1:T2:T3:T4:T5:T6:T7:T8:I0:I1:I2:I3:I4:R0:S0" (14 values + rectangle + string)
+            file << o.ea << " " << o.faction << " " << o.team << " "
+                 << o.general << " " << o.race << " " << o.class_ << " "
+                 << o.specific << " " << o.gender << " " << o.alignment << " ";
+            for (int j = 0; j < 5; j++) file << o.identifiers[j] << " ";
+            file << "[0,0,0,0] "; // rectangle (region) - placeholder for now
+            file << "\"" << o.name << "\"";
+        } else if (gameType == "iwd") {
+            // IWD: "T0:T3:T4:T5:T6:T7:T8:I0:I1:I2:I3:I4:R0:S0" (13 values + rectangle + string)
+            file << o.ea << " " << o.general << " " << o.race << " "
+                 << o.class_ << " " << o.specific << " " << o.gender << " "
+                 << o.alignment << " ";
+            for (int j = 0; j < 5; j++) file << o.identifiers[j] << " ";
+            file << "[0,0,0,0] "; // rectangle (region) - placeholder for now
+            file << "\"" << o.name << "\"";
+        } else if (gameType == "iwd2") {
+            // IWD2: "T0:T3:T4:T5:T6:T7:T8:T9:I0:I1:I2:I3:I4:R0:S0:TA:TB" (16 values + rectangle + string + 2 extra)
+            file << o.ea << " " << o.general << " " << o.race << " "
+                 << o.class_ << " " << o.specific << " " << o.gender << " "
+                 << o.alignment << " " << o.subrace << " ";
+            for (int j = 0; j < 5; j++) file << o.identifiers[j] << " ";
+            file << "[0,0,0,0] "; // rectangle (region) - placeholder for now
+            file << "\"" << o.name << "\" 0 0"; // extra TA:TB parameters
+        } else {
+            // BG (default): "T0:T3:T4:T5:T6:T7:T8:I0:I1:I2:I3:I4:S0" (12 values + string)
+            file << o.ea << " " << o.general << " " << o.race << " "
+                 << o.class_ << " " << o.specific << " " << o.gender << " "
+                 << o.alignment << " ";
+            for (int j = 0; j < 5; j++) file << o.identifiers[j] << " ";
+            file << "\"" << o.name << "\"";
+        }
+
+        Log(DEBUG, "BCS", "Writing object for game '{}': ea={}, general={}, name='{}'", gameType, o.ea, o.general, o.name);
         file << "OB\n";
-        file << action.obj[i].ea << " " << action.obj[i].faction << " " << action.obj[i].team << " "
-             << action.obj[i].general << " " << action.obj[i].race << " " << action.obj[i].class_ << " "
-             << action.obj[i].specific << " " << action.obj[i].gender << " " << action.obj[i].alignment << " "
-             << action.obj[i].identifiers << " " << action.obj[i].area[0] << " " << action.obj[i].area[1] << " "
-             << "\"" << action.obj[i].name << "\"OB\n";
+    };
+
+    // Near Infinity writes objects in order: a1, a2, a3 (corresponding to obj[0], obj[1], obj[2])
+    writeObjLine(action.obj[0], true);   // a1 - first object written (OB on same line as opcode)
+    writeObjLine(action.obj[1], false);  // a2 - second object written (OB on new line)
+    writeObjLine(action.obj[2], false);  // a3 - third object written (OB on new line)
+
+    // Write parameters in Near Infinity order: a4, a5.x, a5.y, a6, a7 + 2 strings + AC
+    file << action.param1 << " " << action.param2 << " " << action.param3 << " "
+         << action.param4 << " " << action.param5;
+    // Write string parameters - always write them if present, or as empty strings for specific cases
+    if (!action.var1.empty() || !action.var2.empty()) {
+        file << "\"" << action.var1 << "\" \"" << action.var2 << "\"";
+    } else {
+        // For actions that should have empty string parameters, write them as empty strings
+        // This handles cases like "2 0 0 0 0\"\" \"\" AC"
+        file << "\"\" \"\"";
     }
-    
-    // Write parameters: 5 numbers + 2 strings + AC
-    file << action.param1 << " " << action.param2 << " " << action.param3 << " " 
-         << action.param4 << " " << action.param5 << "\"" << action.var1 << "\" \"" 
-         << action.var2 << "\" AC\n";
-    
+    file << " AC\n";
+
     return true;
 }
 
@@ -900,36 +1257,40 @@ bool BCS::writeResponse(std::ofstream& file, const BCSResponse& response) {
     }
     
     file << "RE\n";
-    
+
     return true;
 }
 
 bool BCS::writeObject(std::ofstream& file, const BCSObject& object) {
     file << "OB\n";
-    writeNumber(file, object.ea);
+    // Write following BG parse code: T0:T1:T2:T3:T4:T5:T6:T7:T8:I0:I1:I2:I3:I4:S0
+    // Near Infinity includes faction/team even for BG (contrary to comments)
+    writeNumber(file, object.ea);        // T0
     file << " ";
-    writeNumber(file, object.faction);
+    writeNumber(file, object.faction);   // T1
     file << " ";
-    writeNumber(file, object.team);
+    writeNumber(file, object.team);      // T2
     file << " ";
-    writeNumber(file, object.general);
+    writeNumber(file, object.general);   // T3
     file << " ";
-    writeNumber(file, object.race);
+    writeNumber(file, object.race);      // T4
     file << " ";
-    writeNumber(file, object.class_);
+    writeNumber(file, object.class_);    // T5
     file << " ";
-    writeNumber(file, object.specific);
+    writeNumber(file, object.specific);  // T6
     file << " ";
-    writeNumber(file, object.gender);
+    writeNumber(file, object.gender);    // T7
     file << " ";
-    writeNumber(file, object.alignment);
+    writeNumber(file, object.alignment); // T8
     file << " ";
-    writeNumber(file, object.identifiers);
-    file << " ";
-    writeArea(file, object.area);
-    writeString(file, object.name);
+    // Write all identifier values (I0-I4)
+    for (int i = 0; i < 5; i++) {
+        writeNumber(file, object.identifiers[i]);
+        file << " ";
+    }
+    writeString(file, object.name);      // S0
     file << "OB\n";
-    
+
     return true;
 }
 
@@ -955,390 +1316,130 @@ bool BCS::writeArea(std::ofstream& file, const int area[4]) {
 
 // Decompilation methods
 bool BCS::decompileToText(const std::string& filename) {
+    // Ensure decompiler is initialized before use
+    if (!ensureDecompilerInitialized()) {
+        Log(ERROR, "BCS", "Failed to initialize decompiler for text output");
+        return false;
+    }
+    
     std::ofstream file(filename);
     if (!file.is_open()) {
         Log(ERROR, "BCS", "Failed to open file for writing: {}", filename);
         return false;
     }
     
-    file << "// BCS Script: " << resourceName_ << "\n";
-    file << "// Decompiled by ProjectIE4k\n\n";
-    
     for (size_t i = 0; i < blocks.size(); i++) {
-        file << "// Block " << (i + 1) << "\n";
         file << "IF\n";
         
-        // Write triggers
-        for (const auto& trigger : blocks[i].triggers) {
-            file << "  " << decompileTrigger(trigger) << "\n";
+        // Write triggers with logical grouping support
+        size_t groupedTriggersRemaining = 0;
+        for (size_t j = 0; j < blocks[i].triggers.size(); j++) {
+            const auto& trigger = blocks[i].triggers[j];
+            
+            if (decompiler_) {
+                std::string triggerText = decompiler_->decompileTrigger(trigger);
+                
+                // Check if this is a logical operator (OR, AND)
+                if (triggerText.substr(0, 3) == "OR(" || triggerText.substr(0, 4) == "AND(") {
+                    // Extract count parameter
+                    size_t parenPos = triggerText.find('(');
+                    size_t closeParenPos = triggerText.find(')', parenPos);
+                    if (parenPos != std::string::npos && closeParenPos != std::string::npos) {
+                        std::string countStr = triggerText.substr(parenPos + 1, closeParenPos - parenPos - 1);
+                        try {
+                            groupedTriggersRemaining = std::stoi(countStr);
+                        } catch (...) {
+                            groupedTriggersRemaining = 0;
+                        }
+                    }
+                    // Write the logical operator with normal indentation
+                    file << "    " << triggerText << "\n";
+                } else if (groupedTriggersRemaining > 0) {
+                    // This trigger belongs to a logical group - use extra indentation
+                    file << "        " << triggerText << "\n";
+                    groupedTriggersRemaining--;
+                } else {
+                    // Normal trigger - use normal indentation
+                    file << "    " << triggerText << "\n";
+                }
+            } else {
+                file << "    // Error: Decompiler not initialized\n";
+            }
         }
         
         file << "THEN\n";
         
         // Write responses
         for (const auto& response : blocks[i].responses) {
-            file << "  " << decompileResponse(response) << "\n";
-        }
-        
-        file << "END\n\n";
-    }
-    
-    return true;
-}
-
-std::string BCS::decompileTrigger(const BCSTrigger& trigger) {
-    std::string result = getIDSName("trigger", trigger.opcode);
-    
-    // Debug: Log the trigger data
-    Log(DEBUG, "BCS", "Trigger {}: opcode={}, param1={}, param2={}, param3={}, flags={}, var1='{}', var2='{}'", 
-        result, trigger.opcode, trigger.param1, trigger.param2, trigger.param3, trigger.flags, trigger.var1, trigger.var2);
-    Log(DEBUG, "BCS", "  Object: general={}, specific={}, name='{}'", 
-        trigger.object.general, trigger.object.specific, trigger.object.name);
-    
-    if (trigger.flags & 1) {
-        result = "NOT(" + result + ")";
-    }
-    
-    // Add parameters based on trigger type
-    // For True() trigger, no parameters needed
-    if (trigger.opcode == 16419) { // True()
-        return result + "()";
-    }
-    
-    // For other triggers, add parameters if they're not zero/default
-    if (trigger.param1 != 0) {
-        result += "(" + std::to_string(trigger.param1) + ")";
-    }
-    if (trigger.param2 != 0) {
-        result += "(" + std::to_string(trigger.param2) + ")";
-    }
-    if (!trigger.var1.empty()) {
-        result += "(\"" + trigger.var1 + "\")";
-    }
-    if (!trigger.var2.empty()) {
-        result += "(\"" + trigger.var2 + "\")";
-    }
-    
-    return result;
-}
-
-std::string BCS::decompileAction(const BCSAction& action) {
-    std::string result = getIDSName("action", action.opcode);
-    std::vector<std::string> params;
-    
-    // Debug: Log the action data to understand the structure
-    Log(DEBUG, "BCS", "Action {}: opcode={}, param1={}, param2={}, param3={}, param4={}, param5={}, var1='{}', var2='{}'", 
-        result, action.opcode, action.param1, action.param2, action.param3, action.param4, action.param5, action.var1, action.var2);
-    Log(DEBUG, "BCS", "  Objects: obj[0].general={}, obj[1].general={}, obj[2].general={}", 
-        action.obj[0].general, action.obj[1].general, action.obj[2].general);
-    
-    // Handle different action types with proper parameter formatting
-    switch (action.opcode) {
-        case 127: // CutSceneId(O:Object*)
-            if (action.obj[0].general != 0) {
-                params.push_back(getIDSName("object", action.obj[0].general));
-            } else {
-                params.push_back("Player1"); // Default object
-            }
-            break;
-            
-        case 67: // Weather(I:Weather*Weather)
-            if (action.param1 != 0) {
-                params.push_back(std::to_string(action.param1));
-            }
-            break;
-            
-        case 63: // Wait(I:Time*)
-            if (action.param1 != 0) {
-                params.push_back(std::to_string(action.param1));
-            }
-            break;
-            
-        case 49: // MoveViewPoint(P:Target*,I:ScrollSpeed*Scroll)
-            if (action.param2 != 0 || action.param3 != 0) {
-                params.push_back("[" + std::to_string(action.param2) + "." + std::to_string(action.param3) + "]");
-            }
-            if (action.param1 != 0) {
-                params.push_back(std::to_string(action.param1));
-            }
-            break;
-            
-        case 254: // ScreenShake(P:Point*,I:Duration*)
-            if (action.param2 != 0 || action.param3 != 0) {
-                params.push_back("[" + std::to_string(action.param2) + "." + std::to_string(action.param3) + "]");
-            }
-            if (action.param1 != 0) {
-                params.push_back(std::to_string(action.param1));
-            }
-            break;
-            
-        case 272: // CreateVisualEffect(S:Object*,P:Location*)
-            if (!action.var1.empty()) {
-                params.push_back("\"" + action.var1 + "\"");
-            }
-            if (action.param2 != 0 || action.param3 != 0) {
-                params.push_back("[" + std::to_string(action.param2) + "." + std::to_string(action.param3) + "]");
-            }
-            break;
-            
-        case 177: // TriggerActivation(O:Object*,I:State*Boolean)
-            if (action.obj[0].general != 0) {
-                params.push_back(getIDSName("object", action.obj[0].general));
-            } else {
-                params.push_back("\"Caveentrance\""); // Default object name
-            }
-            if (action.param1 != 0) {
-                params.push_back(getIDSName("boolean", action.param1));
-            }
-            break;
-            
-        case 143: // OpenDoor(O:Object*)
-            if (action.obj[0].general != 0) {
-                params.push_back(getIDSName("object", action.obj[0].general));
-            } else {
-                params.push_back("\"swirldoor\""); // Default door name
-            }
-            break;
-            
-        case 301: // AmbientActivate(O:Object*,I:State*Boolean)
-            if (action.obj[0].general != 0) {
-                params.push_back(getIDSName("object", action.obj[0].general));
-            } else {
-                params.push_back("\"swirl\""); // Default ambient name
-            }
-            // Always include the state parameter, default to FALSE if not set
-            if (action.param1 != 0) {
-                params.push_back(getIDSName("boolean", action.param1));
-            } else {
-                params.push_back(getIDSName("boolean", 0));
-            }
-            break;
-            
-        case 50: // MoveViewObject(O:Target*,I:ScrollSpeed*Scroll)
-            if (action.obj[0].general != 0) {
-                params.push_back(getIDSName("object", action.obj[0].general));
-            } else {
-                params.push_back("Player1"); // Default object
-            }
-            if (action.param1 != 0) {
-                params.push_back(std::to_string(action.param1));
-            }
-            break;
-            
-        case 122: // EndCutSceneMode()
-            // No parameters
-            break;
-            
-        default:
-            // Generic parameter handling for unknown actions
-            if (action.param1 != 0) {
-                params.push_back(std::to_string(action.param1));
-            }
-            if (action.param2 != 0) {
-                params.push_back(std::to_string(action.param2));
-            }
-            if (action.param3 != 0) {
-                params.push_back(std::to_string(action.param3));
-            }
-            if (action.param4 != 0) {
-                params.push_back(std::to_string(action.param4));
-            }
-            if (action.param5 != 0) {
-                params.push_back(std::to_string(action.param5));
-            }
-            if (!action.var1.empty()) {
-                params.push_back("\"" + action.var1 + "\"");
-            }
-            if (!action.var2.empty()) {
-                params.push_back("\"" + action.var2 + "\"");
-            }
-            break;
-    }
-    
-    // Add parameters to result
-    if (!params.empty()) {
-        result += "(";
-        for (size_t i = 0; i < params.size(); i++) {
-            if (i > 0) result += ",";
-            result += params[i];
-        }
-        result += ")";
-    } else if (action.opcode == 122) { // EndCutSceneMode
-        result += "()";
-    }
-    
-    return result;
-}
-
-std::string BCS::decompileResponse(const BCSResponse& response) {
-    std::string result = "RESPONSE #" + std::to_string(response.weight) + "\n";
-    
-    for (const auto& action : response.actions) {
-        result += "    " + decompileAction(action) + "\n";
-    }
-    
-    return result;
-}
-
-std::string BCS::decompileObject(const BCSObject& object) {
-    std::string result = "OBJECT(";
-    result += "EA=" + std::to_string(object.ea) + ",";
-    result += "GENERAL=" + std::to_string(object.general) + ",";
-    result += "RACE=" + std::to_string(object.race) + ",";
-    result += "CLASS=" + std::to_string(object.class_) + ",";
-    result += "SPECIFIC=" + std::to_string(object.specific) + ",";
-    result += "GENDER=" + std::to_string(object.gender) + ",";
-    result += "ALIGNMENT=" + std::to_string(object.alignment);
-    
-    if (!object.name.empty()) {
-        result += ",NAME=\"" + object.name + "\"";
-    }
-    
-    result += ")";
-    return result;
-}
-
-
-
-bool BCS::loadIDSFiles() {
-    // Get all available IDS files from our resource service
-    auto resources = PluginManager::getInstance().listResourcesByType(IE_IDS_CLASS_ID);
-    
-    if (resources.empty()) {
-        Log(WARNING, "BCS", "No IDS files found");
-        return false;
-    }
-    
-    Log(DEBUG, "BCS", "Found {} IDS files", resources.size());
-    
-    // Load each IDS file into the universal map
-    for (const auto& resourceName : resources) {
-        Log(DEBUG, "BCS", "Loading IDS file: {}", resourceName);
-        
-        // Load the IDS file into the universal map
-        if (!loadIDSFileFromResource(resourceName)) {
-            Log(WARNING, "BCS", "Failed to load IDS file: {}", resourceName);
-        }
-    }
-    
-    Log(DEBUG, "BCS", "Loaded {} IDS files into universal map", idsMaps.size());
-    
-    return !idsMaps.empty();
-}
-
-bool BCS::loadIDSFileFromResource(const std::string& resourceName) {
-    // Use our resource service to access the resource system
-    auto* resourceCoordinator = dynamic_cast<ResourceCoordinatorService*>(ServiceManager::getService("ResourceCoordinatorService"));
-    if (!resourceCoordinator) {
-        Log(DEBUG, "BCS", "Failed to get ResourceCoordinatorService");
-        return false;
-    }
-    ResourceData resourceData = resourceCoordinator->getResourceData(resourceName, IE_IDS_CLASS_ID);
-    
-    if (resourceData.data.empty()) {
-        Log(DEBUG, "BCS", "Could not find {} resource", resourceName);
-        return false;
-    }
-    
-    std::vector<uint8_t> data = resourceData.data;
-    
-    // Convert to string, handling potential null terminators
-    std::string content(data.begin(), data.end());
-    
-    // Create a new map for this IDS file
-    std::map<int, std::string>& idsMap = idsMaps[resourceName];
-    
-    // Parse the content line by line
-    std::istringstream iss(content);
-    std::string line;
-    
-    while (std::getline(iss, line)) {
-        // Skip comments and empty lines
-        if (line.empty() || line[0] == '#' || line[0] == '/') {
-            continue;
-        }
-        
-        // Parse IDS format: ID Name(Parameters)
-        size_t firstSpace = line.find(' ');
-        if (firstSpace != std::string::npos) {
-            std::string idStr = line.substr(0, firstSpace);
-            std::string nameWithParams = line.substr(firstSpace + 1);
-            
-            // Extract just the name (before the parentheses)
-            size_t parenPos = nameWithParams.find('(');
-            std::string name = (parenPos != std::string::npos) ? 
-                nameWithParams.substr(0, parenPos) : nameWithParams;
-            
-            // Trim whitespace
-            idStr.erase(0, idStr.find_first_not_of(" \t"));
-            idStr.erase(idStr.find_last_not_of(" \t") + 1);
-            name.erase(0, name.find_first_not_of(" \t"));
-            name.erase(name.find_last_not_of(" \t") + 1);
-            
-            try {
-                int opcode;
-                if (idStr.substr(0, 2) == "0x") {
-                    // Handle hexadecimal format (e.g., 0x4023)
-                    opcode = std::stoi(idStr.substr(2), nullptr, 16);
+            file << "    RESPONSE #" << response.weight << "\n";
+            for (const auto& action : response.actions) {
+                if (decompiler_) {
+                    file << "        " << decompiler_->decompileAction(action) << "\n";
                 } else {
-                    // Handle decimal format
-                    opcode = std::stoi(idStr);
+                    file << "        // Error: Decompiler not initialized\n";
                 }
-                idsMap[opcode] = name;
-            } catch (const std::exception& e) {
-                // Skip invalid lines
-                continue;
             }
+        }
+        
+        file << "END\n";
+        
+        // Add blank line between blocks (except after the last block)
+        if (i < blocks.size() - 1) {
+            file << "\n";
         }
     }
     
-    Log(DEBUG, "BCS", "Loaded {} entries from {} resource", idsMap.size(), resourceName);
+    // For empty scripts, write nothing further. For non-empty, add a final newline
+    if (!blocks.empty()) {
+        file << "\n";
+    }
+    
     return true;
 }
 
-std::string BCS::getIDSName(const std::string& idsFile, int value) {
-    auto fileIt = idsMaps.find(idsFile);
-    if (fileIt == idsMaps.end()) {
-        // Try to load the IDS file if not already loaded
-        if (loadIDSFileFromResource(idsFile)) {
-            fileIt = idsMaps.find(idsFile);
-        }
+// Shared resource management implementation
+bool BCS::initializeSharedResources() {
+    Log(MESSAGE, "BCS", "Initializing shared IDS resources for batch operations...");
+    
+    // Load all IDS files once for all BCS instances
+    if (!loadIDSFiles()) {
+        Log(ERROR, "BCS", "Failed to load IDS files for shared resources");
+        return false;
     }
     
-    if (fileIt != idsMaps.end()) {
-        auto valueIt = fileIt->second.find(value);
-        if (valueIt != fileIt->second.end()) {
-            return valueIt->second;
-        }
+    // Initialize the global cache
+    if (!IdsMapCache::initializeGlobalCache()) {
+        Log(ERROR, "BCS", "Failed to initialize global IDS cache");
+        return false;
     }
     
-    // Return fallback name
-    return idsFile + "_" + std::to_string(value);
+    Log(MESSAGE, "BCS", "Shared IDS resources initialized successfully");
+    return true;
 }
 
-int BCS::getIDSValue(const std::string& idsFile, const std::string& name) {
-    auto fileIt = idsMaps.find(idsFile);
-    if (fileIt == idsMaps.end()) {
-        // Try to load the IDS file if not already loaded
-        if (loadIDSFileFromResource(idsFile)) {
-            fileIt = idsMaps.find(idsFile);
-        }
-    }
-    
-    if (fileIt != idsMaps.end()) {
-        // Search for the name in the map
-        for (const auto& pair : fileIt->second) {
-            if (pair.second == name) {
-                return pair.first;
-            }
-        }
-    }
-    
-    // Return -1 if not found
-    return -1;
+void BCS::cleanupSharedResources() {
+    Log(DEBUG, "BCS", "Cleaning up shared IDS resources");
+    // IDS cache cleanup is handled automatically by static destructors
 }
 
-// Auto-register the BCS plugin
+bool BCS::ensureDecompilerInitialized() {
+    if (!decompiler_) {
+        decompiler_ = std::make_unique<BcsDecompiler>();
+    }
+    
+    if (!decompilerInitialized_) {
+        if (decompiler_->initialize()) {
+            decompilerInitialized_ = true;
+            Log(DEBUG, "BCS", "Decompiler initialized successfully");
+        } else {
+            Log(ERROR, "BCS", "Failed to initialize decompiler");
+            return false;
+        }
+    }
+    
+    return true;
+}
+
 REGISTER_PLUGIN(BCS, IE_BCS_CLASS_ID);
 
-} // namespace ProjectIE4k
+}
