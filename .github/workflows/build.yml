@@ -82,7 +82,7 @@ jobs:
             mingw-w64-x86_64-vulkan-headers
             mingw-w64-x86_64-vulkan-loader
             git
-            mingw-w64-nlohmann-json
+            mingw-w64-x86_64-nlohmann-json
 
       - name: Enable long paths for git
         run: git config --global core.longpaths true
