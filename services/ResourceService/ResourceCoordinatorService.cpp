@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "core/Logging/Logging.h"
+#include "services/ServiceManager.h"
 #include "core/SClassID.h"
 #include "core/CFG.h"
 #include "services/ServiceBase.h"
@@ -61,8 +62,14 @@ bool ResourceCoordinatorService::hasResource(const std::string& resourceName, SC
         Log(DEBUG, "ResourceCoordinatorService", "Found resource '{}' in override directory", resourceName);
         return true;
     }
-    
-    // Then check BIF files
+
+    // Then check unhardcoded directory (second priority)
+    if (hasResourceInUnhardcoded(resourceName, resourceType)) {
+        Log(DEBUG, "ResourceCoordinatorService", "Found resource '{}' in unhardcoded directory", resourceName);
+        return true;
+    }
+
+    // Finally check BIF files (lowest priority)
     if (keyService && keyService->hasResource(resourceName, resourceType)) {
         return true;
     }
@@ -84,7 +91,7 @@ ResourceData ResourceCoordinatorService::getResourceData(const std::string& reso
     if (hasResourceInOverride(resourceName, resourceType)) {
         Log(DEBUG, "ResourceCoordinatorService", "Loading resource '{}' from override directory", resourceName);
         std::vector<uint8_t> data = getResourceDataFromOverride(resourceName, resourceType);
-        
+
         // For override files, get the actual filename from the override file map
         std::string normalizedName = normalizeResourceName(resourceName);
         auto it = overrideFileMap.find(std::make_pair(normalizedName, resourceType));
@@ -99,8 +106,28 @@ ResourceData ResourceCoordinatorService::getResourceData(const std::string& reso
             return ResourceData(data, filename);
         }
     }
-    
-    // Then check BIF files
+
+    // Then check unhardcoded directory (second priority)
+    if (hasResourceInUnhardcoded(resourceName, resourceType)) {
+        Log(DEBUG, "ResourceCoordinatorService", "Loading resource '{}' from unhardcoded directory", resourceName);
+        std::vector<uint8_t> data = getResourceDataFromUnhardcoded(resourceName, resourceType);
+
+        // For unhardcoded files, get the actual filename from the unhardcoded file map
+        std::string normalizedName = normalizeResourceName(resourceName);
+        auto it = unhardcodedFileMap.find(std::make_pair(normalizedName, resourceType));
+        if (it != unhardcodedFileMap.end()) {
+            const OverrideFileInfo& fileInfo = it->second;
+            std::string filename = fileInfo.originalFilename;
+            return ResourceData(data, filename);
+        } else {
+            // Fallback: construct filename using SClass extension
+            std::string extension = SClass::getExtension(resourceType);
+            std::string filename = resourceName + "." + extension;
+            return ResourceData(data, filename);
+        }
+    }
+
+    // Finally check BIF files (lowest priority)
     Log(DEBUG, "ResourceCoordinatorService", "About to call keyService->getResourceInfo");
     ResourceInfo resourceInfo = keyService->getResourceInfo(resourceName, resourceType);
     Log(DEBUG, "ResourceCoordinatorService", "keyService->getResourceInfo returned: valid={}, bifIndex={}, offset={}, size={}", 
@@ -174,14 +201,44 @@ std::vector<std::string> ResourceCoordinatorService::listResourcesByType(SClass_
             }
         }
     }
-    
+
+    // Scan unhardcoded shared directory for loose files of this type
+    if (!unhardcodedSharedPath.empty()) {
+        std::string extension = SClass::getExtension(resourceType);
+        if (!extension.empty()) {
+            std::vector<std::string> unhardcodedSharedResources = scanUnhardcodedSharedDirectoryForType(resourceType, extension);
+            for (const auto& resource : unhardcodedSharedResources) {
+                resourceSet.insert(resource);
+            }
+        }
+    }
+
+    // Scan unhardcoded directory for loose files of this type
+    if (!unhardcodedPath.empty()) {
+        std::string extension = SClass::getExtension(resourceType);
+        if (!extension.empty()) {
+            std::vector<std::string> unhardcodedResources = scanUnhardcodedDirectoryForType(resourceType, extension);
+            for (const auto& resource : unhardcodedResources) {
+                resourceSet.insert(resource);
+            }
+        }
+    }
+
     // Convert set back to vector
     resources.assign(resourceSet.begin(), resourceSet.end());
-    
-    Log(DEBUG, "ResourceCoordinatorService", "Found {} resources of type {} ({} from BIF, {} from override)", 
-        resources.size(), resourceType, 
-        keyService ? keyService->listResourcesByType(resourceType).size() : 0,
-        resources.size() - (keyService ? keyService->listResourcesByType(resourceType).size() : 0));
+
+    size_t bifCount = keyService ? keyService->listResourcesByType(resourceType).size() : 0;
+    size_t overrideCount = overridePath.empty() ? 0 :
+        (keyService ? (resources.size() - bifCount - (unhardcodedSharedPath.empty() ? 0 :
+            scanUnhardcodedSharedDirectoryForType(resourceType, SClass::getExtension(resourceType)).size()) - (unhardcodedPath.empty() ? 0 :
+            scanUnhardcodedDirectoryForType(resourceType, SClass::getExtension(resourceType)).size())) : 0);
+    size_t unhardcodedSharedCount = unhardcodedSharedPath.empty() ? 0 :
+        scanUnhardcodedSharedDirectoryForType(resourceType, SClass::getExtension(resourceType)).size();
+    size_t unhardcodedCount = unhardcodedPath.empty() ? 0 :
+        scanUnhardcodedDirectoryForType(resourceType, SClass::getExtension(resourceType)).size();
+
+    Log(DEBUG, "ResourceCoordinatorService", "Found {} resources of type {} ({} from BIF, {} from override, {} from unhardcoded shared, {} from unhardcoded)",
+        resources.size(), resourceType, bifCount, overrideCount, unhardcodedSharedCount, unhardcodedCount);
     
     return resources;
 }
@@ -240,9 +297,16 @@ bool ResourceCoordinatorService::initializeFromGamePath(const std::string& gameP
     
     // Set up override path
     overridePath = (std::filesystem::path(gamePath) / "override").string();
-    
+
+    // Set up unhardcoded path using GameType from config
+    std::filesystem::path installPath = std::filesystem::path(PIE4K_CFG.GemRBPath);
+    unhardcodedPath = (installPath / "unhardcoded" / PIE4K_CFG.GameType).string();
+    unhardcodedSharedPath = (installPath / "unhardcoded" / "shared").string();
+
     Log(DEBUG, "ResourceCoordinatorService", "Initializing with game path: {}", gamePath);
     Log(DEBUG, "ResourceCoordinatorService", "Override path: {}", overridePath);
+    Log(DEBUG, "ResourceCoordinatorService", "Unhardcoded path: {}", unhardcodedPath);
+    Log(DEBUG, "ResourceCoordinatorService", "Unhardcoded shared path: {}", unhardcodedSharedPath);
     
     // Find KEY file
     std::string keyPath = findKEYFile(gamePath);
@@ -283,6 +347,12 @@ bool ResourceCoordinatorService::initializeFromGamePath(const std::string& gameP
     
     // Build the override file map for fast lookups
     buildOverrideFileMap();
+
+    // Build the unhardcoded file map for fast lookups
+    buildUnhardcodedFileMap();
+    
+    // Build the unhardcoded shared file map for fast lookups
+    buildUnhardcodedSharedFileMap();
     
     initialized_ = true;
     Log(MESSAGE, "ResourceCoordinatorService", "Successfully initialized resource coordinator service");
@@ -378,6 +448,132 @@ std::vector<uint8_t> ResourceCoordinatorService::getResourceDataFromOverride(con
     }
     
     Log(DEBUG, "ResourceCoordinatorService", "Successfully loaded {} bytes from override file: {}", data.size(), filePath.string());
+    return data;
+}
+
+bool ResourceCoordinatorService::hasResourceInUnhardcoded(const std::string& resourceName, SClass_ID resourceType) const {
+    if (unhardcodedFileMap.empty()) {
+        return false;
+    }
+
+    // Normalize the resource name for case-insensitive lookup
+    std::string normalizedName = resourceName;
+    std::transform(normalizedName.begin(), normalizedName.end(), normalizedName.begin(), ::toupper);
+
+    // Check if the resource exists in our unhardcoded map with the specific resource type
+    auto it = unhardcodedFileMap.find(std::make_pair(normalizedName, resourceType));
+    if (it != unhardcodedFileMap.end()) {
+        Log(DEBUG, "ResourceCoordinatorService", "Found resource '{}' (type: {}) in unhardcoded map", resourceName, resourceType);
+        return true;
+    }
+
+    return false;
+}
+
+std::vector<uint8_t> ResourceCoordinatorService::getResourceDataFromUnhardcoded(const std::string& resourceName, SClass_ID resourceType) const {
+    if (unhardcodedFileMap.empty()) {
+        return std::vector<uint8_t>();
+    }
+
+    // Normalize the resource name for case-insensitive lookup
+    std::string normalizedName = resourceName;
+    std::transform(normalizedName.begin(), normalizedName.end(), normalizedName.begin(), ::toupper);
+
+    // Find the file info in our unhardcoded map with the specific resource type
+    auto it = unhardcodedFileMap.find(std::make_pair(normalizedName, resourceType));
+    if (it == unhardcodedFileMap.end()) {
+        Log(ERROR, "ResourceCoordinatorService", "Resource '{}' (type: {}) not found in unhardcoded map", resourceName, resourceType);
+        return std::vector<uint8_t>();
+    }
+
+    const OverrideFileInfo& fileInfo = it->second;
+    std::filesystem::path filePath(fileInfo.fullPath);
+
+    if (!std::filesystem::exists(filePath)) {
+        Log(ERROR, "ResourceCoordinatorService", "Unhardcoded file not found: {}", filePath.string());
+        return std::vector<uint8_t>();
+    }
+
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file.is_open()) {
+        Log(ERROR, "ResourceCoordinatorService", "Failed to open unhardcoded file: {}", filePath.string());
+        return std::vector<uint8_t>();
+    }
+
+    // Use the pre-cached file size
+    std::streamsize fileSize = static_cast<std::streamsize>(fileInfo.fileSize);
+
+    // Read file data
+    std::vector<uint8_t> data(fileSize);
+    if (!file.read(reinterpret_cast<char*>(data.data()), fileSize)) {
+        Log(ERROR, "ResourceCoordinatorService", "Failed to read unhardcoded file: {}", filePath.string());
+        return std::vector<uint8_t>();
+    }
+
+    Log(DEBUG, "ResourceCoordinatorService", "Successfully loaded {} bytes from unhardcoded file: {}", data.size(), filePath.string());
+    return data;
+}
+
+bool ResourceCoordinatorService::hasResourceInUnhardcodedShared(const std::string& resourceName, SClass_ID resourceType) const {
+    if (unhardcodedSharedFileMap.empty()) {
+        return false;
+    }
+
+    // Normalize the resource name for case-insensitive lookup
+    std::string normalizedName = resourceName;
+    std::transform(normalizedName.begin(), normalizedName.end(), normalizedName.begin(), ::toupper);
+
+    // Check if the resource exists in our unhardcoded shared map with the specific resource type
+    auto it = unhardcodedSharedFileMap.find(std::make_pair(normalizedName, resourceType));
+    if (it != unhardcodedSharedFileMap.end()) {
+        Log(DEBUG, "ResourceCoordinatorService", "Found resource '{}' (type: {}) in unhardcoded shared map", resourceName, resourceType);
+        return true;
+    }
+
+    return false;
+}
+
+std::vector<uint8_t> ResourceCoordinatorService::getResourceDataFromUnhardcodedShared(const std::string& resourceName, SClass_ID resourceType) const {
+    if (unhardcodedSharedFileMap.empty()) {
+        return std::vector<uint8_t>();
+    }
+
+    // Normalize the resource name for case-insensitive lookup
+    std::string normalizedName = resourceName;
+    std::transform(normalizedName.begin(), normalizedName.end(), normalizedName.begin(), ::toupper);
+
+    // Find the file info in our unhardcoded shared map with the specific resource type
+    auto it = unhardcodedSharedFileMap.find(std::make_pair(normalizedName, resourceType));
+    if (it == unhardcodedSharedFileMap.end()) {
+        Log(ERROR, "ResourceCoordinatorService", "Resource '{}' (type: {}) not found in unhardcoded shared map", resourceName, resourceType);
+        return std::vector<uint8_t>();
+    }
+
+    const OverrideFileInfo& fileInfo = it->second;
+    std::filesystem::path filePath(fileInfo.fullPath);
+
+    if (!std::filesystem::exists(filePath)) {
+        Log(ERROR, "ResourceCoordinatorService", "Unhardcoded shared file not found: {}", filePath.string());
+        return std::vector<uint8_t>();
+    }
+
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file.is_open()) {
+        Log(ERROR, "ResourceCoordinatorService", "Failed to open unhardcoded shared file: {}", filePath.string());
+        return std::vector<uint8_t>();
+    }
+
+    // Use the pre-cached file size
+    std::streamsize fileSize = static_cast<std::streamsize>(fileInfo.fileSize);
+
+    // Read file data
+    std::vector<uint8_t> data(fileSize);
+    if (!file.read(reinterpret_cast<char*>(data.data()), fileSize)) {
+        Log(ERROR, "ResourceCoordinatorService", "Failed to read unhardcoded shared file: {}", filePath.string());
+        return std::vector<uint8_t>();
+    }
+
+    Log(DEBUG, "ResourceCoordinatorService", "Successfully loaded {} bytes from unhardcoded shared file: {}", data.size(), filePath.string());
     return data;
 }
 
@@ -499,6 +695,126 @@ std::vector<std::string> ResourceCoordinatorService::scanOverrideDirectoryForTyp
     return resources;
 }
 
+std::vector<std::string> ResourceCoordinatorService::scanUnhardcodedDirectoryForType(SClass_ID resourceType, const std::string& extension) const {
+    std::vector<std::string> resources;
+
+    if (unhardcodedPath.empty()) {
+        return resources;
+    }
+
+    std::filesystem::path unhardcodedDir(unhardcodedPath);
+    if (!std::filesystem::exists(unhardcodedDir) || !std::filesystem::is_directory(unhardcodedDir)) {
+        Log(DEBUG, "ResourceCoordinatorService", "Unhardcoded directory does not exist or is not a directory: {}", unhardcodedPath);
+        return resources;
+    }
+
+    try {
+        for (const auto& entry : std::filesystem::directory_iterator(unhardcodedDir)) {
+            if (entry.is_regular_file()) {
+                std::string filename = entry.path().filename().string();
+
+                // Check if the file has the correct extension (case insensitive)
+                std::string fileExtension = entry.path().extension().string();
+                std::transform(fileExtension.begin(), fileExtension.end(), fileExtension.begin(), ::tolower);
+                std::string expectedExtension = "." + extension;
+                std::transform(expectedExtension.begin(), expectedExtension.end(), expectedExtension.begin(), ::tolower);
+
+                if (fileExtension == expectedExtension) {
+                    // Extract the resource name (filename without extension)
+                    std::string resourceName = entry.path().stem().string();
+
+                    // Validate the resource name (should be 8 characters or less for IE games)
+                    if (validateResourceName(resourceName)) {
+                        // Normalize the resource name (convert to uppercase)
+                        std::string normalizedName =
+                            normalizeResourceName(resourceName);
+
+                        // Check if this resource is in the known bad list
+                        if (!PIE4K_CFG.isResourceKnownBad(normalizedName)) {
+                          resources.push_back(resourceName);
+                          Log(DEBUG, "ResourceCoordinatorService",
+                              "Found unhardcoded resource: {} (type: {})",
+                              normalizedName, resourceType);
+                        } else {
+                          Log(DEBUG, "ResourceCoordinatorService",
+                              "Skipping known bad unhardcoded resource: {} (type: "
+                              "{})",
+                              normalizedName, resourceType);
+                        }
+                    } else {
+                        Log(WARNING, "ResourceCoordinatorService", "Invalid resource name in unhardcoded: {} (type: {})", resourceName, resourceType);
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        Log(ERROR, "ResourceCoordinatorService", "Error scanning unhardcoded directory: {}", e.what());
+    }
+
+    Log(DEBUG, "ResourceCoordinatorService", "Found {} unhardcoded resources of type {}", resources.size(), resourceType);
+    return resources;
+}
+
+std::vector<std::string> ResourceCoordinatorService::scanUnhardcodedSharedDirectoryForType(SClass_ID resourceType, const std::string& extension) const {
+    std::vector<std::string> resources;
+
+    if (unhardcodedSharedPath.empty()) {
+        return resources;
+    }
+
+    std::filesystem::path unhardcodedSharedDir(unhardcodedSharedPath);
+    if (!std::filesystem::exists(unhardcodedSharedDir) || !std::filesystem::is_directory(unhardcodedSharedDir)) {
+        Log(DEBUG, "ResourceCoordinatorService", "Unhardcoded shared directory does not exist or is not a directory: {}", unhardcodedSharedPath);
+        return resources;
+    }
+
+    try {
+        for (const auto& entry : std::filesystem::directory_iterator(unhardcodedSharedDir)) {
+            if (entry.is_regular_file()) {
+                std::string filename = entry.path().filename().string();
+
+                // Check if the file has the correct extension (case insensitive)
+                std::string fileExtension = entry.path().extension().string();
+                std::transform(fileExtension.begin(), fileExtension.end(), fileExtension.begin(), ::tolower);
+                std::string expectedExtension = "." + extension;
+                std::transform(expectedExtension.begin(), expectedExtension.end(), expectedExtension.begin(), ::tolower);
+
+                if (fileExtension == expectedExtension) {
+                    // Extract the resource name (filename without extension)
+                    std::string resourceName = entry.path().stem().string();
+
+                    // Validate the resource name (should be 8 characters or less for IE games)
+                    if (validateResourceName(resourceName)) {
+                        // Normalize the resource name (convert to uppercase)
+                        std::string normalizedName =
+                            normalizeResourceName(resourceName);
+
+                        // Check if this resource is in the known bad list
+                        if (!PIE4K_CFG.isResourceKnownBad(normalizedName)) {
+                          resources.push_back(resourceName);
+                          Log(DEBUG, "ResourceCoordinatorService",
+                              "Found unhardcoded shared resource: {} (type: {})",
+                              normalizedName, resourceType);
+                        } else {
+                          Log(DEBUG, "ResourceCoordinatorService",
+                              "Skipping known bad unhardcoded shared resource: {} (type: "
+                              "{})",
+                              normalizedName, resourceType);
+                        }
+                    } else {
+                        Log(WARNING, "ResourceCoordinatorService", "Invalid resource name in unhardcoded shared: {} (type: {})", resourceName, resourceType);
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        Log(ERROR, "ResourceCoordinatorService", "Error scanning unhardcoded shared directory: {}", e.what());
+    }
+
+    Log(DEBUG, "ResourceCoordinatorService", "Found {} unhardcoded shared resources of type {}", resources.size(), resourceType);
+    return resources;
+}
+
 void ResourceCoordinatorService::buildOverrideFileMap() {
     overrideFileMap.clear();
     
@@ -566,8 +882,141 @@ void ResourceCoordinatorService::buildOverrideFileMap() {
         Log(ERROR, "ResourceCoordinatorService", "Error building override file map: {}", e.what());
     }
     
-    Log(DEBUG, "ResourceCoordinatorService", "Built override file map with {} entries (total size: {} bytes)", 
+    Log(DEBUG, "ResourceCoordinatorService", "Built override file map with {} entries (total size: {} bytes)",
         overrideFileMap.size(), totalSize);
+}
+
+void ResourceCoordinatorService::buildUnhardcodedFileMap() {
+    unhardcodedFileMap.clear();
+
+    if (unhardcodedPath.empty()) {
+        Log(DEBUG, "ResourceCoordinatorService", "No unhardcoded path set, skipping unhardcoded file map build");
+        return;
+    }
+
+    std::filesystem::path unhardcodedDir(unhardcodedPath);
+    if (!std::filesystem::exists(unhardcodedDir) || !std::filesystem::is_directory(unhardcodedDir)) {
+        Log(DEBUG, "ResourceCoordinatorService", "Unhardcoded directory does not exist or is not a directory: {}", unhardcodedPath);
+        return;
+    }
+
+    Log(DEBUG, "ResourceCoordinatorService", "Building unhardcoded file map from: {}", unhardcodedPath);
+
+    size_t totalSize = 0;
+    size_t fileCount = 0;
+
+    try {
+        for (const auto& entry : std::filesystem::directory_iterator(unhardcodedDir)) {
+            if (entry.is_regular_file()) {
+                std::string filename = entry.path().filename().string();
+                std::string baseName = entry.path().stem().string();
+                std::string extension = entry.path().extension().string();
+
+                // Get file size during indexing
+                uint64_t fileSize = entry.file_size();
+
+                // Normalize the base name (convert to uppercase for case-insensitive lookup)
+                std::transform(baseName.begin(), baseName.end(), baseName.begin(), ::toupper);
+
+                // Convert extension to resource type
+                std::transform(extension.begin(), extension.end(), extension.begin(), ::toupper);
+                SClass_ID resourceType = SClass::getResourceTypeFromExtension(extension);
+
+                if (resourceType != 0) {
+                  // Check if this resource is in the known bad list
+                  if (!PIE4K_CFG.isResourceKnownBad(baseName)) {
+                    // Store the mapping from (base name, resource type) to file info with size
+                    OverrideFileInfo fileInfo(entry.path().string(), fileSize, filename);
+                    unhardcodedFileMap[std::make_pair(baseName, resourceType)] = fileInfo;
+
+                    totalSize += fileSize;
+                    fileCount++;
+
+                    if (verbose) {
+                      Log(DEBUG, "ResourceCoordinatorService",
+                          "Added to unhardcoded map: {} (type: {}) -> {} ({} "
+                          "bytes)",
+                          baseName, resourceType, entry.path().string(),
+                          fileSize);
+                    }
+                  } else {
+                    Log(DEBUG, "ResourceCoordinatorService",
+                        "Skipping known bad unhardcoded resource: {} (type: {})",
+                        baseName, resourceType);
+                  }
+                } else {
+                    Log(DEBUG, "ResourceCoordinatorService", "Skipping file with unknown extension: {}", filename);
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        Log(ERROR, "ResourceCoordinatorService", "Error building unhardcoded file map: {}", e.what());
+    }
+
+    Log(DEBUG, "ResourceCoordinatorService", "Built unhardcoded file map with {} entries (total size: {} bytes)",
+        unhardcodedFileMap.size(), totalSize);
+}
+
+void ResourceCoordinatorService::buildUnhardcodedSharedFileMap() {
+    unhardcodedSharedFileMap.clear();
+    
+    if (unhardcodedSharedPath.empty()) {
+        Log(DEBUG, "ResourceCoordinatorService", "No unhardcoded shared path set, skipping unhardcoded shared file map build");
+        return;
+    }
+    
+    std::filesystem::path unhardcodedSharedDir(unhardcodedSharedPath);
+    if (!std::filesystem::exists(unhardcodedSharedDir) || !std::filesystem::is_directory(unhardcodedSharedDir)) {
+        Log(DEBUG, "ResourceCoordinatorService", "Unhardcoded shared directory does not exist or is not a directory: {}", unhardcodedSharedPath);
+        return;
+    }
+    
+    Log(DEBUG, "ResourceCoordinatorService", "Building unhardcoded shared file map from: {}", unhardcodedSharedPath);
+    
+    size_t totalSize = 0;
+    size_t fileCount = 0;
+    
+    try {
+        for (const auto& entry : std::filesystem::directory_iterator(unhardcodedSharedDir)) {
+            if (entry.is_regular_file()) {
+                std::string filename = entry.path().filename().string();
+                std::string baseName = entry.path().stem().string();
+                std::string extension = entry.path().extension().string();
+                
+                // Get file size during indexing
+                uint64_t fileSize = entry.file_size();
+                
+                // Normalize the base name (convert to uppercase for case-insensitive lookup)
+                std::transform(baseName.begin(), baseName.end(), baseName.begin(), ::toupper);
+                
+                // Convert extension to resource type
+                std::transform(extension.begin(), extension.end(), extension.begin(), ::toupper);
+                SClass_ID resourceType = SClass::getResourceTypeFromExtension(extension);
+                
+                if (resourceType != 0) {
+                  // Check if this resource is in the known bad list
+                  if (!PIE4K_CFG.isResourceKnownBad(baseName)) {
+                    // Store the mapping from (base name, resource type) to file info with size
+                    OverrideFileInfo fileInfo(entry.path().string(), fileSize, filename);
+                    unhardcodedSharedFileMap[std::make_pair(baseName, resourceType)] = fileInfo;
+                    totalSize += fileSize;
+                    fileCount++;
+                  } else {
+                    Log(DEBUG, "ResourceCoordinatorService",
+                        "Skipping known bad unhardcoded shared resource: {} (type: {})",
+                        baseName, resourceType);
+                  }
+                } else {
+                    Log(DEBUG, "ResourceCoordinatorService", "Skipping file with unknown extension: {}", filename);
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        Log(ERROR, "ResourceCoordinatorService", "Error building unhardcoded shared file map: {}", e.what());
+    }
+
+    Log(DEBUG, "ResourceCoordinatorService", "Built unhardcoded shared file map with {} entries (total size: {} bytes)",
+        unhardcodedSharedFileMap.size(), totalSize);
 }
 
 // New methods for resource size information
@@ -580,8 +1029,20 @@ uint64_t ResourceCoordinatorService::getResourceSize(const std::string& resource
     if (it != overrideFileMap.end()) {
         return it->second.fileSize;
     }
-    
-    // Then check BIF files using the complete size index
+
+    // Then check unhardcoded shared files
+    auto usit = unhardcodedSharedFileMap.find(std::make_pair(normalizedName, resourceType));
+    if (usit != unhardcodedSharedFileMap.end()) {
+        return usit->second.fileSize;
+    }
+
+    // Then check unhardcoded files
+    auto uit = unhardcodedFileMap.find(std::make_pair(normalizedName, resourceType));
+    if (uit != unhardcodedFileMap.end()) {
+        return uit->second.fileSize;
+    }
+
+    // Finally check BIF files using the complete size index
     if (bifService) {
         uint32_t size = bifService->getResourceSize(resourceName, resourceType);
         if (size > 0) {
@@ -614,7 +1075,21 @@ std::vector<std::pair<std::string, uint64_t>> ResourceCoordinatorService::getRes
             }
         }
     }
-    
+
+    // Get resources from unhardcoded shared files
+    for (const auto& [key, fileInfo] : unhardcodedSharedFileMap) {
+        if (key.second == resourceType) {
+            resourcesWithSizes.emplace_back(key.first, fileInfo.fileSize);
+        }
+    }
+
+    // Get resources from unhardcoded files
+    for (const auto& [key, fileInfo] : unhardcodedFileMap) {
+        if (key.second == resourceType) {
+            resourcesWithSizes.emplace_back(key.first, fileInfo.fileSize);
+        }
+    }
+
     // Get resources from override files
     for (const auto& [key, fileInfo] : overrideFileMap) {
         if (key.second == resourceType) {
@@ -639,7 +1114,21 @@ size_t ResourceCoordinatorService::getTotalSizeForResourceType(SClass_ID resourc
             }
         }
     }
-    
+
+    // Sum up unhardcoded shared file sizes
+    for (const auto& [key, fileInfo] : unhardcodedSharedFileMap) {
+        if (key.second == resourceType) {
+            totalSize += fileInfo.fileSize;
+        }
+    }
+
+    // Sum up unhardcoded file sizes
+    for (const auto& [key, fileInfo] : unhardcodedFileMap) {
+        if (key.second == resourceType) {
+            totalSize += fileInfo.fileSize;
+        }
+    }
+
     // Sum up override file sizes
     for (const auto& [key, fileInfo] : overrideFileMap) {
         if (key.second == resourceType) {
@@ -689,6 +1178,59 @@ void ResourceCoordinatorService::onLifecycleEvent(ServiceLifecycle event, const 
             // Ignore other events
             break;
     }
+}
+
+bool ResourceCoordinatorService::list() {
+    std::cout << "=== Resource Index Listing ===" << std::endl;
+    std::cout << std::endl;
+    
+    // Get all resource types from SClass
+    auto allTypes = SClass::getAllResourceTypes();
+    
+    // Track totals
+    size_t totalResourceCount = 0;
+    size_t totalTypesWithResources = 0;
+    
+    for (SClass_ID resourceType : allTypes) {
+        auto resources = listResourcesByType(resourceType);
+        
+        if (!resources.empty()) {
+            totalTypesWithResources++;
+            totalResourceCount += resources.size();
+            
+            // Print type header
+            std::cout << SClass::getExtension(resourceType) 
+                      << " (" << SClass::getDescription(resourceType) << "): " 
+                      << resources.size() << " resources" << std::endl;
+            
+            // Print all resources
+            for (const auto& resource : resources) {
+                std::cout << "  " << resource << std::endl;
+            }
+            
+            std::cout << std::endl;
+        }
+    }
+    
+    // Print summary
+    std::cout << "=== Summary ===" << std::endl;
+    std::cout << "Total resource types with resources: " << totalTypesWithResources << std::endl;
+    std::cout << "Total resources: " << totalResourceCount << std::endl;
+    
+    return true;
+}
+
+void ResourceCoordinatorService::registerCommands(CommandTable& commandTable) {
+    commandTable["resources"] = {
+        "Resource index operations",
+        {
+            {"list", {"List all resources in the index",
+                [](const std::vector<std::string>& args) -> int {
+                    return ServiceManager::listAllResources() ? 0 : 1;
+                }
+            }}
+        }
+    };
 }
 
 // Register the service dynamically
