@@ -1,8 +1,8 @@
 #include <iostream>
 #include <string>
-#include <vector>
 
 #include "core/CFG.h"
+#include "core/GlobalContext.h"
 #include "core/Logging/Logging.h"
 #include "plugins/CommandRegistry.h"
 #include "plugins/PluginManager.h"
@@ -13,7 +13,8 @@ using namespace ProjectIE4k;
 
 int main(int argc, char **argv) {
     std::string configFile;
-    // Manual scan for -c anywhere
+    
+    // Manual scan for -c anywhere (other flags handled by GlobalContext)
     for (int i = 1; i < argc; ++i) {
         std::string_view a = argv[i];
         if (a == "-c" && i + 1 < argc) {
@@ -39,6 +40,7 @@ int main(int argc, char **argv) {
     // Initialize command registry for help or execution
     CommandTable commandTable;
     PluginManager::getInstance().registerAllCommands(commandTable);
+    ServiceManager::registerCommands(commandTable);
 
     // Show help if no command specified
     if (argc <= 1) {
@@ -52,8 +54,11 @@ int main(int argc, char **argv) {
     ToggleLogging(PIE4K_CFG.Logging);
     Log(MESSAGE, "Core", "Project IE 4K using GamePath: {}", PIE4K_CFG.GamePath);
 
-    // Trigger application start lifecycle
+    // Trigger application start lifecycle and register context providers
     ServiceManager::onApplicationStart();
+    
+    // Parse all registered context providers (after logging is initialized)
+    GlobalContext::getInstance().parseAll(argc, argv);
 
     int result = prepareCommands(commandTable, argc, argv);
 

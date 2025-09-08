@@ -25,12 +25,14 @@ class CFG {
     std::string TISUpscalerModel;
     std::string PLTUpscalerModel;
     std::vector<std::string> ResourceKnownBad;
+    std::vector<std::string> Palettes;
     std::vector<int> UsableGPUIDs;
     double MaxCPU;
     double MaxRAM;
     double MaxGPU;
     double MaxVRAM;
     std::string NCNNModelPath;
+    std::string GemRBPath;
 
     CFG();
 

@@ -13,7 +13,7 @@
 namespace ProjectIE4k {
 
 CFG::CFG()
-    : GamePath(""), GameType(""), Logging(true), UpScaleFactor(1),
+    : GamePath(""), GameType(""), GemRBPath(""), Logging(true), UpScaleFactor(1),
       RetainCache(false), upscalerModel("upscayl-ultrasharp-v2"),
       MOSUpscalerModel(""), BAMUpscalerModel(""), BMPUpscalerModel(""),
       PNGUpscalerModel(""), TISUpscalerModel(""), PLTUpscalerModel(""),
@@ -69,6 +69,7 @@ void CFG::initialize(const std::string& configFile) {
     // Read game path and type
     GamePath = config.get("GamePath", "");
     GameType = config.get("GameType", "");
+    GemRBPath = config.get("GemRBPath", "");
 
     // Read resource limits
     auto maxCPUStr = config.get("MaxCPU", "100");
@@ -105,7 +106,10 @@ void CFG::initialize(const std::string& configFile) {
         UsableGPUIDs.push_back(0);
         Log(DEBUG, "Config", "UsableGPUIDs not specified; defaulting to [0]");
     }
-    
+
+    auto PalettesStr = config.get("Palettes", "");
+    Palettes = splitCommaSeparated(PalettesStr);
+
     // Read known bad resources list and split into vector
     auto resourceKnownBadStr = config.get("ResourceKnownBad", "");
     ResourceKnownBad = splitCommaSeparated(resourceKnownBadStr);
