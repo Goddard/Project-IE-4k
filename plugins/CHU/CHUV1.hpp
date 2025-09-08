@@ -1,5 +1,14 @@
 
+
+#pragma once
+
+#include <cstdint>
+#include <vector>
+#include <cstring>
+#include <string>
+
 namespace ProjectIE4k {
+#pragma pack(push, 1)
 // CHU V1 Header structure (per IESDP)
 struct CHUHeader {
     char signature[4];      // 'CHUI'
@@ -129,6 +138,91 @@ struct CHUControlScrollbar {
 struct CHUControl {
     CHUControlCommon common;
     // Use a union or std::variant in implementation for type-specific data
+};
+#pragma pack(pop)
+
+// High-level container for CHU V1 files
+struct CHUV1File {
+    CHUHeader header{};
+    std::vector<CHUWindow> windows;
+    std::vector<CHUControlTableEntry> controlTable;
+    std::vector<std::vector<uint8_t>> controls; // raw control blobs aligned with controlTable
+
+    bool deserialize(const std::vector<uint8_t>& data) {
+        if (data.size() < sizeof(CHUHeader)) return false;
+        std::memcpy(&header, data.data(), sizeof(CHUHeader));
+        if (std::string(header.signature, 4) != std::string("CHUI", 4)) return false;
+        // Some engines use "V1 " with trailing space
+        if (!(std::string(header.version, 4) == std::string("V1 ", 3) || std::string(header.version, 4) == std::string("V1 ", 4))) {
+            // still accept as long as layout matches
+        }
+
+        // Read windows
+        if (header.windowOffset + header.windowCount * sizeof(CHUWindow) > data.size()) return false;
+        windows.resize(header.windowCount);
+        std::memcpy(windows.data(), data.data() + header.windowOffset, header.windowCount * sizeof(CHUWindow));
+
+        // Compute total controls from windows
+        uint32_t totalControls = 0;
+        for (const auto &w : windows) totalControls += static_cast<uint32_t>(w.controlCount);
+
+        // Read control table
+        if (header.controlTableOffset + totalControls * sizeof(CHUControlTableEntry) > data.size()) return false;
+        controlTable.resize(totalControls);
+        std::memcpy(controlTable.data(), data.data() + header.controlTableOffset, totalControls * sizeof(CHUControlTableEntry));
+
+        // Read control blobs
+        controls.resize(totalControls);
+        for (uint32_t i = 0; i < totalControls; ++i) {
+            const auto &cte = controlTable[i];
+            uint64_t off = cte.controlOffset;
+            uint64_t len = cte.controlLength;
+            if (off + len > data.size()) return false;
+            controls[i] = std::vector<uint8_t>(data.begin() + off, data.begin() + off + len);
+        }
+        return true;
+    }
+
+    std::vector<uint8_t> serialize() const {
+        // Layout: [Header][Windows][ControlTable][Controls...]
+        std::vector<uint8_t> out;
+        out.resize(sizeof(CHUHeader));
+        CHUHeader h = header;
+
+        // Windows
+        uint32_t winOffset = static_cast<uint32_t>(out.size());
+        if (!windows.empty()) {
+            const uint8_t* start = reinterpret_cast<const uint8_t*>(windows.data());
+            out.insert(out.end(), start, start + windows.size() * sizeof(CHUWindow));
+        }
+
+        // Control table
+        uint32_t ctOffset = static_cast<uint32_t>(out.size());
+        std::vector<CHUControlTableEntry> ct = controlTable; // will adjust offsets
+        if (!ct.empty()) {
+            const uint8_t* start = reinterpret_cast<const uint8_t*>(ct.data());
+            out.insert(out.end(), start, start + ct.size() * sizeof(CHUControlTableEntry));
+        }
+
+        // Controls data, update offsets/lengths
+        for (size_t i = 0; i < controls.size(); ++i) {
+            ct[i].controlOffset = static_cast<uint32_t>(out.size());
+            ct[i].controlLength = static_cast<uint32_t>(controls[i].size());
+            out.insert(out.end(), controls[i].begin(), controls[i].end());
+        }
+
+        // Rewrite adjusted control table
+        if (!ct.empty()) {
+            std::memcpy(out.data() + ctOffset, ct.data(), ct.size() * sizeof(CHUControlTableEntry));
+        }
+
+        // Finalize header
+        h.windowOffset = winOffset;
+        h.controlTableOffset = ctOffset;
+        h.windowCount = static_cast<uint32_t>(windows.size());
+        std::memcpy(out.data(), &h, sizeof(CHUHeader));
+        return out;
+    }
 };
 
 } // namespace ProjectIE4k

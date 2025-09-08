@@ -56,9 +56,6 @@ public:
     // Register plugin commands
     static void registerCommands(CommandTable& commandTable);
     
-    // Additional CHU-specific operations
-    bool compare(const std::string& compareType);
-    
     // Header access
     CHUHeader& getHeader() { return header; }
     const CHUHeader& getHeader() const { return header; }
@@ -67,33 +64,19 @@ public:
     const std::vector<uint8_t>& getFileData() const { return originalFileData; }
 
     // Data access
-    const std::vector<CHUWindow>& getWindows() const { return windows; }
-    const std::vector<CHUControlTableEntry>& getControlTable() const { return controlTable; }
+    const std::vector<CHUWindow>& getWindows() const { static const std::vector<CHUWindow> empty; return v1_ ? v1_->windows : empty; }
+    const std::vector<CHUControlTableEntry>& getControlTable() const { static const std::vector<CHUControlTableEntry> empty; return v1_ ? v1_->controlTable : empty; }
     // Controls will be handled as a variant/union in implementation
 
 private:
-    // CHU data structures
-    CHUHeader header;
-    std::vector<CHUWindow> windows;
-    std::vector<CHUControlTableEntry> controlTable;
-    // std::vector<CHUControl> controls; // to be implemented
-    std::vector<std::vector<uint8_t>> controlData;
+    // Parsed V1 container (preferred over ad-hoc parsing)
+    std::unique_ptr<CHUV1File> v1_;
+    CHUHeader header; // retained for legacy helpers/compare
     
     // Helper methods
     bool loadFromData();
     bool readHeader();
-    bool readWindows();
-    bool readControlTable();
-    // bool readControls();
-    
     bool writeHeader(std::ofstream& file);
-    // bool writeWindows(...);
-    // bool writeControlTable(...);
-    // bool writeControls(...);
-    
-    // Control data handling
-    std::vector<std::vector<uint8_t>> readControlData();
-    std::vector<uint8_t> upscaleControlData(const std::vector<uint8_t>& originalData, int upscaleFactor);
     
     // Utility methods
     bool cleanDirectory(const std::string& dir);
