@@ -61,11 +61,11 @@ bool MOS::readSigAndVer(const std::vector<uint8_t>& fileData) {
     
     // Copy the first 8 bytes to the signature array
     memcpy(referenceSignature, fileData.data(), 8);
-    
+
     // Log the signature for debugging
     std::string signatureStr(referenceSignature, 8);
     Log(MESSAGE, "MOS", "Read signature: '{}'", signatureStr);
-    
+
     // Check if it's a valid MOS signature
     if (memcmp(referenceSignature, "MOS V1  ", 8) == 0) {
         Log(MESSAGE, "MOS", "Detected MOS V1 format");
@@ -84,7 +84,7 @@ bool MOS::readSigAndVer(const std::vector<uint8_t>& fileData) {
         return true;
     } else if (memcmp(referenceSignature, "MOSC", 4) == 0) {
         // Check version for MOSC
-        if (fileData.size() >= 8 && memcmp(fileData.data() + 4, "V2 ", 4) == 0) {
+        if (fileData.size() >= 8 && memcmp(fileData.data() + 4, "V2  ", 4) == 0) {
             Log(MESSAGE, "MOS", "Detected compressed MOS V2 format");
             isV2 = true;
             compressed = true;
@@ -213,7 +213,7 @@ std::vector<uint8_t> MOS::decompressZlib(const std::vector<uint8_t>& compressedD
 }
 
 bool MOS::convertPngToMosV1() {
-    std::string inputFile = getExtractDir() + "/" + resourceName_ + ".png";
+    std::string inputFile = getUpscaledDir() + "/" + resourceName_ + ".png";
     std::string outputFile = getAssembleDir(true) + "/" + originalFileName;
     
     Log(DEBUG, "MOS", "convertPngToMosV1 called with compressed={}", compressed);
@@ -363,8 +363,8 @@ bool MOS::convertPngToMosV2() {
     Log(DEBUG, "MOS", "Converting PNG to MOS V2 format");
     
     // Get the input PNG file path
-    std::string inputFile = getExtractDir() + "/" + resourceName_ + ".png";
-    std::string outputFile = getAssembleDir(true) + "/" + resourceName_ + originalExtension;
+    std::string inputFile = getUpscaledDir() + "/" + resourceName_ + ".png";
+    std::string outputFile = getAssembleDir(true) + "/" + originalFileName;
     
     Log(DEBUG, "MOS", "Converting {} to {}", inputFile, outputFile);
     
@@ -603,15 +603,15 @@ bool MOS::convertMosV2ToPng() {
 
 // Batch operations (implemented by PluginManager)
 bool MOS::extractAll() {
-    return ProjectIE4k::PluginManager::getInstance().extractAllResourcesOfType(IE_MOS_CLASS_ID);
+    return PluginManager::getInstance().extractAllResourcesOfType(IE_MOS_CLASS_ID);
 }
 
 bool MOS::upscaleAll() {
-    return ProjectIE4k::PluginManager::getInstance().upscaleAllResourcesOfType(IE_MOS_CLASS_ID);
+    return PluginManager::getInstance().upscaleAllResourcesOfType(IE_MOS_CLASS_ID);
 }
 
 bool MOS::assembleAll() {
-    return ProjectIE4k::PluginManager::getInstance().assembleAllResourcesOfType(IE_MOS_CLASS_ID);
+    return PluginManager::getInstance().assembleAllResourcesOfType(IE_MOS_CLASS_ID);
 }
 
 // Clean directories before operations - operation-specific
@@ -678,7 +678,7 @@ void MOS::registerCommands(CommandTable& commandTable) {
                         std::cerr << "Usage: mos extract <resource_name>" << std::endl;
                         return 1;
                     }
-                    return ProjectIE4k::PluginManager::getInstance().extractResource(args[0], IE_MOS_CLASS_ID) ? 0 : 1;
+                    return PluginManager::getInstance().extractResource(args[0], IE_MOS_CLASS_ID) ? 0 : 1;
                 }
             }},
             {"upscale", {
@@ -688,7 +688,7 @@ void MOS::registerCommands(CommandTable& commandTable) {
                         std::cerr << "Usage: mos upscale <resource_name>" << std::endl;
                         return 1;
                     }
-                    return ProjectIE4k::PluginManager::getInstance().upscaleResource(args[0], IE_MOS_CLASS_ID) ? 0 : 1;
+                    return PluginManager::getInstance().upscaleResource(args[0], IE_MOS_CLASS_ID) ? 0 : 1;
                 }
             }},
             {"assemble", {
@@ -698,7 +698,7 @@ void MOS::registerCommands(CommandTable& commandTable) {
                         std::cerr << "Usage: mos assemble <resource_name>" << std::endl;
                         return 1;
                     }
-                    return ProjectIE4k::PluginManager::getInstance().assembleResource(args[0], IE_MOS_CLASS_ID) ? 0 : 1;
+                    return PluginManager::getInstance().assembleResource(args[0], IE_MOS_CLASS_ID) ? 0 : 1;
                 }
             }},
         }

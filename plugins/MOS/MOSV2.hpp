@@ -1,6 +1,10 @@
 #ifndef MOSV2_HPP
 #define MOSV2_HPP
 
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
 namespace ProjectIE4k {
 
 // MOS V2 file format structures (serializable)

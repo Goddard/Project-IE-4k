@@ -1,22 +1,28 @@
 #ifndef MOSV1_H
 #define MOSV1_H
 
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
 namespace ProjectIE4k {
 
 // MOS V1 file format structures (serializable)
 #pragma pack(push, 1) // Ensure no padding
 
 struct MOSHeader {
-    char signature[8];    // "MOS V1  "
+    char signature[4];    // "MOS "
+    char version[4];      // "V1  "
     uint16_t width;       // Image width
     uint16_t height;      // Image height
     uint16_t cols;        // Number of columns (tiles)
     uint16_t rows;        // Number of rows (tiles)
     uint32_t tileSize;    // Tile size (64)
     uint32_t paletteOffset; // Offset to palette data
-    
+
     MOSHeader() : width(0), height(0), cols(0), rows(0), tileSize(64), paletteOffset(24) {
-        memcpy(signature, "MOS V1  ", 8);
+        memcpy(signature, "MOS ", 4);
+        memcpy(version, "V1  ", 4);
     }
     
     void setDimensions(uint16_t w, uint16_t h, uint16_t c, uint16_t r) {
@@ -66,12 +72,12 @@ struct PaletteEntry {
 // MOSC V1 header structure
 struct MOSCHeader {
     char signature[4];    // "MOSC"
-    char version[4];      // "V1 "
+    char version[4];      // "V1  "
     uint32_t uncompressedSize;
     
     MOSCHeader() : uncompressedSize(0) {
         memcpy(signature, "MOSC", 4);
-        memcpy(version, "V1 ", 4);
+        memcpy(version, "V1  ", 4);
     }
     
     void setUncompressedSize(uint32_t size) {
@@ -141,8 +147,9 @@ struct MOSV1File {
         // Read header
         memcpy(&header, data.data(), sizeof(MOSHeader));
         
-        // Validate signature
-        if (memcmp(header.signature, "MOS V1  ", 8) != 0) {
+        // Validate signature and version
+        if (memcmp(header.signature, "MOS ", 4) != 0 ||
+            memcmp(header.version, "V1  ", 4) != 0) {
             return false;
         }
         
