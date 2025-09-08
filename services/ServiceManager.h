@@ -1,12 +1,15 @@
 #pragma once
 
 #include "ServiceBase.h"
-#include "core/SClassID.h"
+
 #include <string>
 #include <functional>
 #include <memory>
 #include <map>
 #include <vector>
+
+#include "core/SClassID.h"
+#include "plugins/CommandRegistry.h"
 
 namespace ProjectIE4k {
 
@@ -142,6 +145,18 @@ public:
      * @param resourceType The resource type being processed
      */
     static void onResourceEnd(const std::string& resourceName, SClass_ID resourceType);
+
+    /**
+     * @brief Register service commands to the command table
+     * @param commandTable The command table to register commands to
+     */
+    static void registerCommands(CommandTable& commandTable);
+
+    /**
+     * @brief List all resources in the index
+     * @return true if successful
+     */
+    static bool listAllResources();
 
 private:
     static std::map<std::string, ServiceFactory>& getRegistry();

@@ -3,6 +3,7 @@
 #include <mutex>
 
 #include "core/Logging/Logging.h"
+#include "ResourceService/ResourceCoordinatorService.h"
 
 namespace ProjectIE4k {
 
@@ -194,6 +195,26 @@ void ServiceManager::onResourceEnd(const std::string& resourceName, SClass_ID re
     Log(DEBUG, "ServiceManager", "Resource end lifecycle triggered for: {} (type: {})", resourceName, resourceType);
     notifyServicesOfEvent(ServiceLifecycle::RESOURCE_END, resourceName + ":" + std::to_string(resourceType));
     cleanupServicesByScope(ServiceScope::RESOURCE_SCOPED);
+}
+
+void ServiceManager::registerCommands(CommandTable& commandTable) {
+    // Register commands from each service that implements registerCommands
+    ResourceCoordinatorService::registerCommands(commandTable);
+    // Add more service command registrations here as they are implemented:
+    // StatisticsService::registerCommands(commandTable);
+}
+
+// TODO :: make more generalized so all services can have some command methods
+bool ServiceManager::listAllResources() {
+    // Get the ResourceCoordinatorService and use it to list all resources
+    auto* service = dynamic_cast<ResourceCoordinatorService*>(getService("ResourceCoordinatorService"));
+    if (!service) {
+        std::cerr << "ResourceCoordinatorService not available" << std::endl;
+        return false;
+    }
+    
+    // Call the service's list method to do the actual work
+    return service->list();
 }
 
 // Private lifecycle management helpers
