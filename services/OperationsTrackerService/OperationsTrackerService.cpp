@@ -136,11 +136,19 @@ void OperationsTrackerService::loadLedgerIntoCacheUnsafe() {
             // Thread-safe access to cache
             {
                 std::lock_guard<std::mutex> lock(mtx_);
-                
+
                 if (event == "start") {
-                    LatestEntry &le = latestCache_[key];
-                    le.configHash = getField("configHash");
-                    le.opVersion = getField("opVersion");
+                    // Thread-safe insertion/update using find/insert to avoid race conditions
+                    auto it = latestCache_.find(key);
+                    if (it == latestCache_.end()) {
+                        // Insert new entry
+                        auto result = latestCache_.emplace(key, LatestEntry{});
+                        it = result.first;
+                    }
+                    LatestEntry& entry = it->second;
+
+                    entry.configHash = getField("configHash");
+                    entry.opVersion = getField("opVersion");
                     // numeric fields are within fp; attempt to parse
                     auto parseUint = [&](const std::string& k) -> uint64_t {
                         std::string v = getField(k);
@@ -153,12 +161,12 @@ void OperationsTrackerService::loadLedgerIntoCacheUnsafe() {
                         try { return static_cast<int64_t>(std::stoll(v)); } catch (...) { return 0; }
                     };
 
-                    le.bifIndex = static_cast<int>(parseInt("bifIndex"));
-                    le.keyLocator = static_cast<uint32_t>(parseUint("keyLocator"));
-                    le.size = static_cast<uint32_t>(parseUint("size"));
-                    le.sourcePath = getField("sourcePath");
-                    le.mtime = parseUint("mtime");
-                    le.overrideSize = parseUint("overrideSize");
+                    entry.bifIndex = static_cast<int>(parseInt("bifIndex"));
+                    entry.keyLocator = static_cast<uint32_t>(parseUint("keyLocator"));
+                    entry.size = static_cast<uint32_t>(parseUint("size"));
+                    entry.sourcePath = getField("sourcePath");
+                    entry.mtime = parseUint("mtime");
+                    entry.overrideSize = parseUint("overrideSize");
                     // success remains as previously known (default false)
                 } else if (event == "end") {
                     bool success = false;
@@ -167,8 +175,14 @@ void OperationsTrackerService::loadLedgerIntoCacheUnsafe() {
                         // s could be true/false
                         success = (s.find("true") != std::string::npos || s == "1");
                     }
-                    LatestEntry &le = latestCache_[key];
-                    le.success = success;
+                    // Thread-safe update using find/insert
+                    auto it = latestCache_.find(key);
+                    if (it == latestCache_.end()) {
+                        // Insert new entry
+                        auto result = latestCache_.emplace(key, LatestEntry{});
+                        it = result.first;
+                    }
+                    it->second.success = success;
                 }
             }
         }
@@ -290,15 +304,16 @@ void OperationsTrackerService::markStarted(const std::string& phase,
     writeJsonlUnsafe(entry.dump());
 
     // Update cache with provided fingerprint for immediate shouldProcess decisions
-    LatestEntry &le = latestCache_[makeKey(phase, resourceType, resourceName)];
-    le.configHash = fp.configHash;
-    le.opVersion = fp.opVersion;
-    le.bifIndex = fp.bifIndex;
-    le.keyLocator = fp.keyLocator;
-    le.size = fp.size;
-    le.sourcePath = fp.sourcePath;
-    le.mtime = fp.mtime;
-    le.overrideSize = fp.overrideSize;
+    auto key = makeKey(phase, resourceType, resourceName);
+    auto& cacheEntry = latestCache_[key]; // Safe within locked context
+    cacheEntry.configHash = fp.configHash;
+    cacheEntry.opVersion = fp.opVersion;
+    cacheEntry.bifIndex = fp.bifIndex;
+    cacheEntry.keyLocator = fp.keyLocator;
+    cacheEntry.size = fp.size;
+    cacheEntry.sourcePath = fp.sourcePath;
+    cacheEntry.mtime = fp.mtime;
+    cacheEntry.overrideSize = fp.overrideSize;
 }
 
 void OperationsTrackerService::markCompleted(const std::string& phase,
@@ -326,8 +341,6 @@ void OperationsTrackerService::markCompleted(const std::string& phase,
     
     writeJsonlUnsafe(entry.dump());
 
-    LatestEntry le;
-    le.success = success;
     // We do not update fingerprint here because we didn't receive it; rely on prior markStarted
     // and cache merging from shouldProcess callers that set it beforehand if desired.
     auto key = makeKey(phase, resourceType, resourceName);
@@ -335,7 +348,8 @@ void OperationsTrackerService::markCompleted(const std::string& phase,
     if (it != latestCache_.end()) {
         it->second.success = success;
     } else {
-        latestCache_[key] = le;
+        // Safe insertion within locked context
+        latestCache_.emplace(key, LatestEntry{.success = success});
     }
 }
 
