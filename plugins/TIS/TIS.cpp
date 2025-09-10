@@ -6,10 +6,12 @@
 // #include <future>
 #include <iostream>
 #include <set>
+#include <map>
 #include <string>
 // #include <thread>
 
 #include "core/Logging/Logging.h"
+#include "core/CFG.h"
 // #include "core/OperationsMonitor/OperationsMonitor.h"
 #include "core/SClassID.h"
 #include "plugins/ColorReducer.h"
@@ -438,26 +440,20 @@ bool TIS::convertTisToPng() {
     
     Log(DEBUG, "TIS", "Grid dimensions: {}x{} tiles", tilesPerRow, tilesPerColumn);
     
-    // Create stitched image - use WED grid dimensions as foundation
+    // Create stitched image for ONLY the primary grid (from WED)
     uint32_t totalTiles = isPvrzBased ? tisV2File.header.tileCount : tisV1File.header.tileCount;
+    int primaryTiles = tilesPerRow * tilesPerColumn;
+    int secondaryTiles = std::max(0, static_cast<int>(totalTiles) - primaryTiles);
     
-    // Use WED grid dimensions as the primary grid, then extend to accommodate secondary tiles
-    int primaryTiles = tilesPerRow * tilesPerColumn; // 54 * 42 = 2268
-    int secondaryTiles = totalTiles - primaryTiles;  // 2370 - 2268 = 102
-    
-    // Calculate how many additional rows we need for secondary tiles
-    int additionalRows = (secondaryTiles + tilesPerRow - 1) / tilesPerRow; // 102 / 54 = 2
-    
-    int totalTilesPerRow = tilesPerRow;  // Keep the WED width (54)
-    int totalTilesPerColumn = tilesPerColumn + additionalRows; // 42 + 2 = 44
+    int totalTilesPerRow = tilesPerRow;
+    int totalTilesPerColumn = tilesPerColumn;
     
     int imageWidth = totalTilesPerRow * 64;
     int imageHeight = totalTilesPerColumn * 64;
     std::vector<uint32_t> pixels(imageWidth * imageHeight, 0);
     
     Log(DEBUG, "TIS", "Primary grid (from WED): {}x{} = {} tiles", tilesPerRow, tilesPerColumn, primaryTiles);
-    Log(DEBUG, "TIS", "Secondary tiles: {} (need {} additional rows)", secondaryTiles, additionalRows);
-    Log(DEBUG, "TIS", "Total image grid: {}x{} = {} tiles", totalTilesPerRow, totalTilesPerColumn, totalTilesPerRow * totalTilesPerColumn);
+    Log(DEBUG, "TIS", "Secondary tiles to extract separately: {}", secondaryTiles);
     
     if (isPvrzBased) {
         // Handle TIS V2 (PVRZ-based)
@@ -471,8 +467,8 @@ bool TIS::convertTisToPng() {
         std::map<uint32_t, int> pageWidths;
         std::map<uint32_t, int> pageHeights;
         
-        // Process each tile based on PVRZ coordinates
-        for (uint32_t tileIndex = 0; tileIndex < tisV2File.header.tileCount; tileIndex++) {
+        // Process primary tiles based on PVRZ coordinates
+        for (uint32_t tileIndex = 0; tileIndex < static_cast<uint32_t>(std::min(primaryTiles, static_cast<int>(tisV2File.header.tileCount))); tileIndex++) {
             int tileX = tileIndex % totalTilesPerRow;
             int tileY = tileIndex / totalTilesPerRow;
             
@@ -575,12 +571,87 @@ bool TIS::convertTisToPng() {
                 }
             }
         }
+
+        // Extract and save secondary tiles as individual PNGs
+        if (secondaryTiles > 0) {
+            std::string outputDir = getExtractDir();
+            for (uint32_t tileIndex = primaryTiles; tileIndex < tisV2File.header.tileCount; tileIndex++) {
+                if (tileIndex >= tisV2File.tiles.size()) break;
+                const TISV2Tile& tile = tisV2File.tiles[tileIndex];
+
+                std::vector<uint32_t> tilePixels(64 * 64, 0);
+                if (tile.page == 0xFFFFFFFF) {
+                    // Solid black tile
+                    for (int y = 0; y < 64; y++) {
+                        for (int x = 0; x < 64; x++) {
+                            tilePixels[y * 64 + x] = 0xFF000000;
+                        }
+                    }
+                } else {
+                    // PVRZ-based tile - load actual texture data
+                    std::string pvrzResourceName = PluginManager::getInstance().generatePVRZNameInternal(resourceName_, 0, IE_TIS_CLASS_ID);
+                    if (loadedPages.find(tile.page) == loadedPages.end()) {
+                        std::vector<uint8_t> argbData;
+                        int width, height;
+                        if (pvrzLoader.loadPVRZResourceAsARGB(pvrzResourceName, argbData, width, height)) {
+                            loadedPages[tile.page] = argbData;
+                            pageWidths[tile.page] = width;
+                            pageHeights[tile.page] = height;
+                            Log(DEBUG, "TIS", "Loaded PVRZ page {}: {}x{} (for secondary)", tile.page, width, height);
+                        } else {
+                            Log(ERROR, "TIS", "Failed to load PVRZ page {} ({}) for secondary tile {}", tile.page, pvrzResourceName, tileIndex);
+                            loadedPages[tile.page] = std::vector<uint8_t>();
+                        }
+                    }
+
+                    if (!loadedPages[tile.page].empty()) {
+                        const std::vector<uint8_t>& argbData = loadedPages[tile.page];
+                        int pageWidth = pageWidths[tile.page];
+                        int pageHeight = pageHeights[tile.page];
+                        for (int y = 0; y < 64; y++) {
+                            for (int x = 0; x < 64; x++) {
+                                int srcX = tile.x + x;
+                                int srcY = tile.y + y;
+                                if (srcX < pageWidth && srcY < pageHeight) {
+                                    int srcIndex = (srcY * pageWidth + srcX) * 4;
+                                    if (srcIndex + 3 < static_cast<int>(argbData.size())) {
+                                        uint8_t a = argbData[srcIndex + 0];
+                                        uint8_t r = argbData[srcIndex + 1];
+                                        uint8_t g = argbData[srcIndex + 2];
+                                        uint8_t b = argbData[srcIndex + 3];
+                                        tilePixels[y * 64 + x] = (a << 24) | (r << 16) | (g << 8) | b;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Error visualization for missing page
+                        for (int y = 0; y < 64; y++) {
+                            for (int x = 0; x < 64; x++) {
+                                uint8_t r = (tile.page * 20) % 256;
+                                uint8_t g = (tile.x / 64) % 256;
+                                uint8_t b = (tile.y / 64) % 256;
+                                if ((x + y) % 16 < 8) { r = (r + 128) % 256; g = (g + 128) % 256; b = (b + 128) % 256; }
+                                tilePixels[y * 64 + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                            }
+                        }
+                    }
+                }
+
+                std::string tileFilename = outputDir + "/" + resourceName_ + "_tile_" + std::to_string(tileIndex) + ".png";
+                if (savePNG(tileFilename, tilePixels, 64, 64)) {
+                    Log(DEBUG, "TIS", "Saved secondary tile {} to {}", tileIndex, tileFilename);
+                } else {
+                    Log(WARNING, "TIS", "Failed to save secondary tile {} to {}", tileIndex, tileFilename);
+                }
+            }
+        }
     } else {
         // Handle TIS V1 (palette-based)
         Log(DEBUG, "TIS", "Processing TIS V1 (palette-based) tiles");
         
-        // Process each tile
-        for (uint32_t tileIndex = 0; tileIndex < tisV1File.header.tileCount; tileIndex++) {
+        // Process primary tiles only
+        for (uint32_t tileIndex = 0; tileIndex < static_cast<uint32_t>(std::min(primaryTiles, static_cast<int>(tisV1File.header.tileCount))); tileIndex++) {
             int tileX = tileIndex % totalTilesPerRow;
             int tileY = tileIndex / totalTilesPerRow;
             
@@ -637,6 +708,34 @@ bool TIS::convertTisToPng() {
                 }
             }
         }
+
+        // Extract and save secondary tiles as individual PNGs
+        if (secondaryTiles > 0) {
+            std::string outputDir = getExtractDir();
+            for (uint32_t tileIndex = primaryTiles; tileIndex < tisV1File.header.tileCount; tileIndex++) {
+                if (tileIndex >= tisV1File.tiles.size()) break;
+                const TISV1Tile& tile = tisV1File.tiles[tileIndex];
+
+                std::vector<uint32_t> tilePixels(64 * 64, 0);
+                for (int y = 0; y < 64; y++) {
+                    for (int x = 0; x < 64; x++) {
+                        uint8_t paletteIndex = tile.getPixel(x, y);
+                        if (paletteIndex == 0 && ColorReducer::isMagicGreenBGRA(tile.palette[0])) {
+                            tilePixels[y * 64 + x] = 0x00000000; // transparent
+                        } else {
+                            tilePixels[y * 64 + x] = tile.getColor(paletteIndex);
+                        }
+                    }
+                }
+
+                std::string tileFilename = outputDir + "/" + resourceName_ + "_tile_" + std::to_string(tileIndex) + ".png";
+                if (savePNG(tileFilename, tilePixels, 64, 64)) {
+                    Log(DEBUG, "TIS", "Saved secondary tile {} to {}", tileIndex, tileFilename);
+                } else {
+                    Log(WARNING, "TIS", "Failed to save secondary tile {} to {}", tileIndex, tileFilename);
+                }
+            }
+        }
     }
     
     // Get output directory (automatically created by PluginManager)
@@ -653,181 +752,200 @@ bool TIS::convertTisToPng() {
 }
 
 bool TIS::convertPngToTis() {
-    Log(DEBUG, "TIS", "Converting PNG to TIS V1 (PVRZ-based) format");
-    
-    // Get the input PNG file path (from upscaled directory)
-    std::string inputFile = getUpscaledDir() + "/" + resourceName_ + ".png";
-    std::string outputFile = getAssembleDir() + "/" + resourceName_ + originalExtension;
-    
-    // Load PNG image
+    Log(DEBUG, "TIS", "Converting PNG to TIS V2 (PVRZ-based) with appended secondary tiles");
+
+    // Inputs and outputs
+    std::string inputFile = getUpscaledDir() + "/" + resourceName_ + ".png"; // primary grid only
+    std::string upscaledDir = getUpscaledDir();
+    std::string outputFile = getAssembleDir() + "/" + originalFileName;
+
+    // Load primary PNG image
     std::vector<uint32_t> pixels;
-    int imageWidth, imageHeight;
-    
+    int imageWidth = 0, imageHeight = 0;
     if (!loadPNG(inputFile, pixels, imageWidth, imageHeight)) {
         Log(ERROR, "TIS", "Failed to load PNG file: {}", inputFile);
         return false;
     }
-    
-    Log(DEBUG, "TIS", "Loaded image: {}x{}", imageWidth, imageHeight);
-    
-    // Calculate tile grid from image
-    int totalTilesPerRow = imageWidth / 64;
-    int totalTilesPerColumn = imageHeight / 64;
-    int totalTileCount = totalTilesPerRow * totalTilesPerColumn;
-    
-    Log(DEBUG, "TIS", "Image grid dimensions: {}x{} tiles ({} total)", totalTilesPerRow, totalTilesPerColumn, totalTileCount);
-    
-    // Parse WED file to get primary grid dimensions
-    if (!parseWEDFile()) {
-        Log(WARNING, "TIS", "Failed to parse WED file, using single row layout");
-        // Default to single row layout if WED parsing fails
-        tilesPerRow = totalTileCount;
-        tilesPerColumn = 1;
+    Log(DEBUG, "TIS", "Loaded primary image: {}x{}", imageWidth, imageHeight);
+
+    // Primary tiles from image
+    const int primaryTilesPerRow = imageWidth / 64;
+    const int primaryTilesPerColumn = imageHeight / 64;
+    const int primaryTileCountFromImage = primaryTilesPerRow * primaryTilesPerColumn;
+    Log(DEBUG, "TIS", "Primary grid inferred from image: {}x{} ({} tiles)", primaryTilesPerRow, primaryTilesPerColumn, primaryTileCountFromImage);
+
+    // Parse WED to get original grid and original secondary references
+    ProjectIE4k::WEDFile wedFile;
+    if (!wedFile.deserialize(originalWedFileData) || !wedFile.isValid() || wedFile.overlays.empty()) {
+        Log(ERROR, "TIS", "Failed to deserialize original WED for assembling secondary tiles");
+        return false;
     }
-    
-    Log(DEBUG, "TIS", "Primary grid (from WED): {}x{} = {} tiles", tilesPerRow, tilesPerColumn, tilesPerRow * tilesPerColumn);
-    
-    // Calculate secondary tiles
-    int primaryTileCount = tilesPerRow * tilesPerColumn;
-    int secondaryTileCount = totalTileCount - primaryTileCount;
-    
-    Log(DEBUG, "TIS", "Secondary tiles: {}", secondaryTileCount);
-    
-    // Create PVRZ texture atlases
-    PVRZ pvrz;
-    std::vector<std::string> pvrzFiles;
-    std::map<int, std::pair<uint32_t, std::pair<int, int>>> tileToPageMapping; // tileIndex -> (page, (x, y))
-    
-    // Calculate optimal PVRZ atlas size based on tile count
-    int tilesPerPvrz, tilesPerPvrzRow, tilesPerPvrzColumn, atlasWidth, atlasHeight;
-    
-    if (totalTileCount <= 64) {
-        // Small tile count: use 512x512 atlas (8x8 grid, 64 tiles)
-        tilesPerPvrz = 64;
-        tilesPerPvrzRow = 8;
-        tilesPerPvrzColumn = 8;
-        atlasWidth = 512;
-        atlasHeight = 512;
-    } else if (totalTileCount <= 128) {
-        // Medium tile count: use 512x1024 atlas (8x16 grid, 128 tiles)
-        tilesPerPvrz = 128;
-        tilesPerPvrzRow = 8;
-        tilesPerPvrzColumn = 16;
-        atlasWidth = 512;
-        atlasHeight = 1024;
-    } else {
-        // Large tile count: use 1024x1024 atlas (16x16 grid, 256 tiles)
-        // This matches the original TIS structure where most pages are 1024x1024
-        tilesPerPvrz = 256;
-        tilesPerPvrzRow = 16;
-        tilesPerPvrzColumn = 16;
-        atlasWidth = 1024;
-        atlasHeight = 1024;
+    const auto &primaryOverlay = wedFile.overlays[0];
+    const int origWidth = primaryOverlay.width;
+    const int origHeight = primaryOverlay.height;
+    const int upscaleFactor = PIE4K_CFG.UpScaleFactor;
+    const int mapWidth = origWidth * upscaleFactor; // full-width used by secondary rows
+
+    // Sanity: primary image should be upscaled grid (origWidth*factor x origHeight*factor)
+    if (primaryTilesPerRow != mapWidth || primaryTilesPerColumn != origHeight * upscaleFactor) {
+        Log(WARNING, "TIS", "Primary image grid {}x{} doesn't match expected upscaled grid {}x{} (proceeding)",
+            primaryTilesPerRow, primaryTilesPerColumn, mapWidth, origHeight * upscaleFactor);
     }
-    
-    Log(DEBUG, "TIS", "Using {}x{} PVRZ atlases ({} tiles per atlas, {}x{} grid)", 
-        atlasWidth, atlasHeight, tilesPerPvrz, tilesPerPvrzRow, tilesPerPvrzColumn);
-    
-    for (int pageIndex = 0; pageIndex < (totalTileCount + tilesPerPvrz - 1) / tilesPerPvrz; pageIndex++) {
-        std::vector<std::vector<uint32_t>> tilePixels; // In-memory tile pixel buffers
-        std::vector<std::pair<int, int>> tilePositions;
-        
-        // Extract tiles for this PVRZ page
-        for (int tileInPage = 0; tileInPage < tilesPerPvrz; tileInPage++) {
-            int tileIndex = pageIndex * tilesPerPvrz + tileInPage;
-            
-            if (tileIndex >= totalTileCount) {
-                break;
+
+    // Build combined tile list: first all primary tiles from image, then secondary tiles generated by splitting
+    std::vector<std::vector<uint32_t>> allTiles;
+    allTiles.reserve(static_cast<size_t>(primaryTileCountFromImage));
+
+    // Slice primary image into 64x64 tiles row-major
+    for (int tileY = 0; tileY < primaryTilesPerColumn; ++tileY) {
+        for (int tileX = 0; tileX < primaryTilesPerRow; ++tileX) {
+            std::vector<uint32_t> tileBuf(64 * 64);
+            for (int y = 0; y < 64; ++y) {
+                int srcY = tileY * 64 + y;
+                const uint32_t *srcRow = pixels.data() + srcY * imageWidth + tileX * 64;
+                std::copy_n(srcRow, 64, tileBuf.data() + y * 64);
             }
-            
-            // Calculate tile position in the input image
-            int tileX = tileIndex % totalTilesPerRow;
-            int tileY = tileIndex / totalTilesPerRow;
-            
-            // Extract tile pixels from the loaded image
-            std::vector<uint32_t> tileBuf;
-            tileBuf.reserve(64 * 64);
-            for (int y = 0; y < 64; y++) {
-                for (int x = 0; x < 64; x++) {
-                    int srcX = tileX * 64 + x;
-                    int srcY = tileY * 64 + y;
-                    if (srcX < imageWidth && srcY < imageHeight) {
-                        tileBuf.push_back(pixels[srcY * imageWidth + srcX]);
+            allTiles.push_back(std::move(tileBuf));
+        }
+    }
+
+    // Build sequential secondary list (no gaps) in order dy → oy → ox → dx, only for originals with a secondary
+    std::vector<std::vector<uint32_t>> secondarySeq;
+    secondarySeq.reserve(origWidth * origHeight * upscaleFactor * upscaleFactor);
+
+    // Cache for upscaled secondary PNGs by original tile index
+    struct Img { std::vector<uint32_t> px; int w=0; int h=0; };
+    std::map<uint16_t, Img> secCache;
+
+    // Walk original tilemaps and collect subtiles sequentially
+    if (!wedFile.tilemaps.empty()) {
+        const auto &origTilemaps = wedFile.tilemaps[0];
+        for (int dy = 0; dy < upscaleFactor; ++dy) {
+            for (int oy = 0; oy < origHeight; ++oy) {
+                for (int ox = 0; ox < origWidth; ++ox) {
+                    int idx = oy * origWidth + ox;
+                    if (idx >= static_cast<int>(origTilemaps.size())) continue;
+                    const auto &tm = origTilemaps[idx];
+                    if (tm.secondaryIndex == 0xFFFF) continue;
+                    uint16_t secIdx = tm.secondaryIndex;
+
+                    Img img;
+                    auto it = secCache.find(secIdx);
+                    if (it == secCache.end()) {
+                        std::string secPng = upscaledDir + "/" + resourceName_ + "_tile_" + std::to_string(secIdx) + ".png";
+                        if (!loadPNG(secPng, img.px, img.w, img.h)) {
+                            Log(WARNING, "TIS", "Missing upscaled secondary PNG {} for tile {}", secPng, secIdx);
+                            img.px.clear(); img.w = img.h = 0;
+                        }
+                        secCache[secIdx] = img;
                     } else {
-                        tileBuf.push_back(0); // Transparent
+                        img = it->second;
+                    }
+                    if (img.px.empty() || img.w < upscaleFactor*64 || img.h < upscaleFactor*64) continue;
+
+                    for (int dx = 0; dx < upscaleFactor; ++dx) {
+                        std::vector<uint32_t> subtile(64 * 64);
+                        int sx0 = dx * 64; int sy0 = dy * 64;
+                        for (int y = 0; y < 64; ++y) {
+                            const uint32_t *srcRow = img.px.data() + (sy0 + y) * img.w + sx0;
+                            std::copy_n(srcRow, 64, subtile.data() + y * 64);
+                        }
+                        secondarySeq.push_back(std::move(subtile));
                     }
                 }
             }
-            
-            // Calculate position in PVRZ using the correct grid dimensions
+        }
+    }
+    Log(DEBUG, "TIS", "Sequential secondary tiles collected: {}", secondarySeq.size());
+
+    // Append sequential secondaries
+    allTiles.reserve(allTiles.size() + secondarySeq.size());
+    for (auto &t : secondarySeq) allTiles.push_back(std::move(t));
+
+    const int finalTileCount = static_cast<int>(allTiles.size());
+    Log(DEBUG, "TIS", "Final tile count: primary={} + secondary={} = {}", primaryTileCountFromImage, secondarySeq.size(), finalTileCount);
+
+    // Create PVRZ texture atlases from allTiles
+    PVRZ pvrz;
+    std::vector<std::string> pvrzFiles;
+    std::map<int, std::pair<uint32_t, std::pair<int, int>>> tileToPageMapping; // tileIndex -> (page, (x, y))
+
+    // Choose atlas layout based on total count
+    int tilesPerPvrz, tilesPerPvrzRow, tilesPerPvrzColumn, atlasWidth, atlasHeight;
+    if (finalTileCount <= 64) {
+        tilesPerPvrz = 64; tilesPerPvrzRow = 8; tilesPerPvrzColumn = 8; atlasWidth = 512; atlasHeight = 512;
+    } else if (finalTileCount <= 128) {
+        tilesPerPvrz = 128; tilesPerPvrzRow = 8; tilesPerPvrzColumn = 16; atlasWidth = 512; atlasHeight = 1024;
+    } else {
+        tilesPerPvrz = 256; tilesPerPvrzRow = 16; tilesPerPvrzColumn = 16; atlasWidth = 1024; atlasHeight = 1024;
+    }
+    Log(DEBUG, "TIS", "Using {}x{} PVRZ atlases ({} tiles per atlas, {}x{} grid)", atlasWidth, atlasHeight, tilesPerPvrz, tilesPerPvrzRow, tilesPerPvrzColumn);
+
+    int pageIndex = 0;
+    int tileIndexGlobal = 0;
+    while (tileIndexGlobal < finalTileCount) {
+        std::vector<std::vector<uint32_t>> pageTiles;
+        std::vector<std::pair<int,int>> positions;
+        pageTiles.reserve(tilesPerPvrz);
+        positions.reserve(tilesPerPvrz);
+
+        int tilesInThisPage = std::min(tilesPerPvrz, finalTileCount - tileIndexGlobal);
+        for (int tileInPage = 0; tileInPage < tilesInThisPage; ++tileInPage, ++tileIndexGlobal) {
             int pvrzX = (tileInPage % tilesPerPvrzRow) * 64;
             int pvrzY = (tileInPage / tilesPerPvrzRow) * 64;
-            tilePositions.push_back({static_cast<unsigned int>(pvrzX), static_cast<unsigned int>(pvrzY)});
-            tilePixels.push_back(std::move(tileBuf));
-            
-            // Store mapping
-            tileToPageMapping[tileIndex] = {static_cast<uint32_t>(pageIndex), {static_cast<uint32_t>(pvrzX), static_cast<uint32_t>(pvrzY)}};
+            positions.push_back({pvrzX, pvrzY});
+            pageTiles.push_back(std::move(allTiles[tileIndexGlobal]));
+            tileToPageMapping[tileIndexGlobal] = {static_cast<uint32_t>(pageIndex), {static_cast<uint32_t>(pvrzX), static_cast<uint32_t>(pvrzY)}};
         }
-        
-        if (!tilePixels.empty()) {
-            // Create PVRZ file directly from pixel buffers
-            auto [pvrzFileName, pageNum] = PluginManager::getInstance().generatePVRZName(resourceName_, IE_TIS_CLASS_ID);
-            std::string pvrzFilePath = getAssembleDir() + "/" + pvrzFileName + pvrzOriginalExtension;
-            if (pvrz.createTextureAtlasPVRZFromPixels(tilePixels, tilePositions, pvrzFilePath, atlasWidth, atlasHeight, PVRZFormat::DXT5)) {
-                pvrzFiles.push_back(pvrzFilePath);
-                Log(DEBUG, "TIS", "Created PVRZ page {}: {}", pageIndex, pvrzFilePath);
-            } else {
-                Log(ERROR, "TIS", "Failed to create PVRZ page {}", pageIndex);
-                return false;
+
+        auto [pvrzFileName, pageNum] = PluginManager::getInstance().generatePVRZName(resourceName_, IE_TIS_CLASS_ID);
+        std::string pvrzFilePath = getAssembleDir() + "/" + pvrzFileName + pvrzOriginalExtension;
+        if (pvrz.createTextureAtlasPVRZFromPixels(pageTiles, positions, pvrzFilePath, atlasWidth, atlasHeight, PVRZFormat::DXT5)) {
+            pvrzFiles.push_back(pvrzFilePath);
+            Log(DEBUG, "TIS", "Created PVRZ page (id={}) file {} ({} tiles)", pageNum, pvrzFilePath, tilesInThisPage);
+            // Update recorded mapping for the tiles we just placed to use the real pageNum
+            int firstGlobal = tileIndexGlobal - tilesInThisPage;
+            for (int t = 0; t < tilesInThisPage; ++t) {
+                auto it = tileToPageMapping.find(firstGlobal + t);
+                if (it != tileToPageMapping.end()) {
+                    it->second.first = static_cast<uint32_t>(pageNum);
+                }
             }
-        }
-    }
-    
-    // Create TIS V2 file with PVRZ-based tiles
-    TISV2File tisFile;
-    tisFile.header.setTileCount(totalTileCount); // Use total tile count for proper upscaled file
-    tisFile.header.tileSize = 12; // PVRZ-based tiles are 12 bytes
-    tisFile.tiles.resize(totalTileCount); // Keep all tiles in the data structure
-    
-    // Set up tile entries for PVRZ-based format
-    for (int tileIndex = 0; tileIndex < totalTileCount; tileIndex++) {
-        auto it = tileToPageMapping.find(tileIndex);
-        if (it != tileToPageMapping.end()) {
-            // For PVRZ-based tiles, we use TISV2Tile structure
-            // The tile data contains: page (4 bytes), x (4 bytes), y (4 bytes)
-            TISV2Tile& tile = tisFile.tiles[tileIndex];
-            
-            // Store PVRZ info in the tile data
-            tile.page = it->second.first;
-            tile.x = it->second.second.first;
-            tile.y = it->second.second.second;
-            
-            Log(DEBUG, "TIS", "Tile {}: Page={}, X={}, Y={}", tileIndex, tile.page, tile.x, tile.y);
         } else {
-            Log(ERROR, "TIS", "No mapping found for tile {}", tileIndex);
+            Log(ERROR, "TIS", "Failed to create PVRZ page {}", pageIndex);
             return false;
         }
+        ++pageIndex;
     }
-    
-    // Serialize to binary data
+
+    // Build TIS V2 with finalTileCount tiles
+    TISV2File tisFile;
+    tisFile.header.setTileCount(finalTileCount);
+    tisFile.header.tileSize = 12;
+    tisFile.tiles.resize(finalTileCount);
+    for (int t = 0; t < finalTileCount; ++t) {
+        auto it = tileToPageMapping.find(t);
+        if (it == tileToPageMapping.end()) {
+            Log(ERROR, "TIS", "No mapping found for final tile {}", t);
+            return false;
+        }
+        TISV2Tile &tile = tisFile.tiles[t];
+        tile.page = it->second.first;
+        tile.x = it->second.second.first;
+        tile.y = it->second.second.second;
+    }
+
+    // Serialize and write
     originalTisFileData = tisFile.serialize();
-    
-    // Get output directory
-    std::string outputDir = getAssembleDir();
-    
-    // Write TIS file
     std::ofstream outFile(outputFile, std::ios::binary);
     if (!outFile) {
         Log(ERROR, "TIS", "Cannot write to {}", outputFile);
         return false;
     }
-    
     outFile.write(reinterpret_cast<const char*>(originalTisFileData.data()), originalTisFileData.size());
     outFile.close();
-    
-    Log(DEBUG, "TIS", "Successfully created TIS V1 (PVRZ-based) file: {}", outputFile);
-    Log(DEBUG, "TIS", "Created {} PVRZ files", pvrzFiles.size());
-    
+
+    Log(DEBUG, "TIS", "Successfully created TIS V2 with {} tiles and {} PVRZ pages", finalTileCount, pvrzFiles.size());
     return true;
 }
 
@@ -971,7 +1089,8 @@ bool TIS::convertPngToTisV1Palette() {
     std::string inputFile = getUpscaledDir() + "/" + resourceName_ + ".png";
     std::string outputFile = getAssembleDir() + "/" + originalFileName;
 
-    // We'll stream-read the PNG and write TIS tiles on the fly
+    // We'll stream-read the PNG and write TIS tiles on the fly (primary first),
+    // then append secondary tiles split from individually upscaled secondary PNGs.
     std::ofstream outFile; // opened after we know dimensions
 
     // State captured across rows
@@ -981,6 +1100,27 @@ bool TIS::convertPngToTisV1Palette() {
     int stripeRow = 0; // row within 64-row stripe
     std::vector<uint32_t> stripeBuffer; // holds up to 64 rows
     uint64_t tilesWritten = 0;
+
+    // Pre-parse WED to compute final tile count and secondary layout
+    int origWidth = 0, origHeight = 0, upscaleFactor = 1;
+    int secOriginalCount = 0; // number of original cells that had a secondary
+    do {
+        if (originalWedFileData.empty()) break;
+        ProjectIE4k::WEDFile wedFileTmp;
+        if (!wedFileTmp.deserialize(originalWedFileData) || !wedFileTmp.isValid() || wedFileTmp.overlays.empty()) break;
+        origWidth = wedFileTmp.overlays[0].width;
+        origHeight = wedFileTmp.overlays[0].height;
+        upscaleFactor = PIE4K_CFG.UpScaleFactor;
+        if (!wedFileTmp.tilemaps.empty()) {
+            const auto &origTms = wedFileTmp.tilemaps[0];
+            for (size_t i = 0; i < origTms.size(); ++i) {
+                if (origTms[i].secondaryIndex != 0xFFFF) ++secOriginalCount;
+            }
+        }
+    } while(false);
+
+    int primaryTileCountPlanned = 0; // set after we know image dimensions
+    int secondaryTileCountPlanned = 0; // (#original cells with secondary) * factor * factor
 
     auto onRow = [&](int width, int height, int rowIndex, const std::vector<uint32_t> &argbRow) -> bool {
         if (!headerWritten) {
@@ -993,16 +1133,19 @@ bool TIS::convertPngToTisV1Palette() {
             Log(DEBUG, "TIS", "Loaded image: {}x{}", imageWidth, imageHeight);
             Log(DEBUG, "TIS", "Image grid dimensions: {}x{} tiles ({} total)", totalTilesPerRow, totalTilesPerColumn, totalTileCount);
 
-            // Optionally parse WED for layout logs
-            if (!parseWEDFile()) {
-                Log(WARNING, "TIS", "Failed to parse WED file, using single row layout");
-                tilesPerRow = totalTileCount;
-                tilesPerColumn = 1;
+            // Primary count is what the image provides
+            tilesPerRow = totalTilesPerRow;
+            tilesPerColumn = totalTilesPerColumn;
+            primaryTileCountPlanned = totalTileCount;
+
+            // Compute planned secondary tiles (no-gap sequential): count originals with secondary × factor×factor
+            if (secOriginalCount > 0 && upscaleFactor > 0) {
+                secondaryTileCountPlanned = secOriginalCount * upscaleFactor * upscaleFactor;
+            } else {
+                secondaryTileCountPlanned = 0;
             }
-            Log(DEBUG, "TIS", "Primary grid (from WED): {}x{} = {} tiles", tilesPerRow, tilesPerColumn, tilesPerRow * tilesPerColumn);
-            int primaryTileCount = tilesPerRow * tilesPerColumn;
-            int secondaryTileCount = totalTileCount - primaryTileCount;
-            Log(DEBUG, "TIS", "Secondary tiles: {}", secondaryTileCount);
+            Log(DEBUG, "TIS", "Planned primary tiles: {} | secondary tiles: {} (originals_with_secondary={} factor={})",
+                primaryTileCountPlanned, secondaryTileCountPlanned, secOriginalCount, upscaleFactor);
 
             // Open output and write header
             outFile.open(outputFile, std::ios::binary);
@@ -1011,7 +1154,7 @@ bool TIS::convertPngToTisV1Palette() {
                 return false;
             }
             TISHeader header;
-            header.setTileCount(static_cast<uint32_t>(totalTileCount));
+            header.setTileCount(static_cast<uint32_t>(primaryTileCountPlanned + secondaryTileCountPlanned));
             header.tileSize = 5120;
             outFile.write(reinterpret_cast<const char*>(&header), sizeof(TISHeader));
 
@@ -1059,12 +1202,63 @@ bool TIS::convertPngToTisV1Palette() {
         return false;
     }
 
+    // Append secondary tiles if planned (no-gap sequential packing)
+    if (secondaryTileCountPlanned > 0 && origWidth > 0) {
+        Log(DEBUG, "TIS", "Assembling {} secondary tiles from upscaled PNGs (sequential)", secondaryTileCountPlanned);
+        // Load original WED to fetch original secondary indices per tile
+        ProjectIE4k::WEDFile wedFile;
+        if (wedFile.deserialize(originalWedFileData) && wedFile.isValid() && !wedFile.overlays.empty() && !wedFile.tilemaps.empty()) {
+            const auto &origTilemaps = wedFile.tilemaps[0];
+            struct Img { std::vector<uint32_t> px; int w=0; int h=0; };
+            std::map<uint16_t, Img> cache;
+            TISV1Tile tile;
+            int writtenSec = 0;
+            for (int dy = 0; dy < upscaleFactor; ++dy) {
+                for (int oy = 0; oy < origHeight; ++oy) {
+                    for (int ox = 0; ox < origWidth; ++ox) {
+                        int idx = oy * origWidth + ox;
+                        if (idx >= static_cast<int>(origTilemaps.size())) continue;
+                        const auto &tm = origTilemaps[idx];
+                        if (tm.secondaryIndex == 0xFFFF) continue;
+                        uint16_t secIdx = tm.secondaryIndex;
+                        Img img;
+                        auto it = cache.find(secIdx);
+                        if (it == cache.end()) {
+                            std::string secPng = getUpscaledDir() + "/" + resourceName_ + "_tile_" + std::to_string(secIdx) + ".png";
+                            if (!loadPNG(secPng, img.px, img.w, img.h)) {
+                                Log(WARNING, "TIS", "Missing upscaled secondary PNG {} for tile {}", secPng, secIdx);
+                                img.px.clear(); img.w = img.h = 0;
+                            }
+                            cache[secIdx] = img;
+                        } else {
+                            img = it->second;
+                        }
+                        if (img.px.empty() || img.w < upscaleFactor*64 || img.h < upscaleFactor*64) continue;
+                        for (int dx = 0; dx < upscaleFactor; ++dx) {
+                            std::vector<uint32_t> subtile(64*64);
+                            int sx0 = dx * 64; int sy0 = dy * 64;
+                            for (int y = 0; y < 64; ++y) {
+                                const uint32_t *srcRow = img.px.data() + (sy0 + y) * img.w + sx0;
+                                std::copy_n(srcRow, 64, subtile.data() + y * 64);
+                            }
+                            if (!createTile(subtile, tile)) { Log(ERROR, "TIS", "Failed to create secondary tile (dy={}, oy={}, ox={}, dx={})", dy, oy, ox, dx); continue; }
+                            outFile.write(reinterpret_cast<const char*>(&tile), sizeof(TISV1Tile));
+                            ++writtenSec;
+                        }
+                    }
+                }
+            }
+            Log(DEBUG, "TIS", "Wrote {} secondary tiles (expected {})", writtenSec, secondaryTileCountPlanned);
+            tilesWritten += writtenSec;
+        }
+    }
+
     if (outFile.is_open()) outFile.close();
 
     Log(DEBUG, "TIS", "Successfully created TIS V1 (palette-based) file: {}", outputFile);
-    Log(DEBUG, "TIS", "Created {} palette-based tiles (expected {})", tilesWritten, static_cast<uint64_t>(totalTileCount));
+    Log(DEBUG, "TIS", "Created {} palette-based tiles (expected {})", tilesWritten, static_cast<uint64_t>(primaryTileCountPlanned + secondaryTileCountPlanned));
     
-    return tilesWritten == static_cast<uint64_t>(totalTileCount);
+    return tilesWritten == static_cast<uint64_t>(primaryTileCountPlanned + secondaryTileCountPlanned);
 }
 
 // Batch operations (implemented by PluginManager)

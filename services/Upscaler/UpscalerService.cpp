@@ -680,11 +680,14 @@ bool UpscalerService::upscaleDirectory(const std::string& inputDir, const std::s
       auto [loadVRAM, inferenceVRAM, totalVRAM] = calculateVramUsage(
           modelName, header.cols, header.rows, PIE4K_CFG.UpScaleFactor);
 
+      // For tiled processing, a task processes tiles sequentially.
+      // The per-task VRAM footprint should reflect a single tile, not the whole directory.
       uint64_t taskVRAM = totalVRAM;
-      // task execution VRAM depends on method
+      int startingThreads = 1;
       if (header.cols > optimalSettings_.tileSize ||
           header.rows > optimalSettings_.tileSize) {
-        taskVRAM = optimalSettings_.vramPerTile * imageFiles.size();
+        taskVRAM = optimalSettings_.vramPerTile; // per-tile VRAM footprint
+        startingThreads = std::max(1, optimalSettings_.maxConcurrentTiles);
       }
 
       // Create resource requirements for this task
@@ -695,10 +698,12 @@ bool UpscalerService::upscaleDirectory(const std::string& inputDir, const std::s
       req.resourceName = fs::path(inputPath).filename().string();
       req.resourceAccess = ResourceAccess::RESERVED;
       req.priority = TaskPriority::NORMAL;
+      req.startingThreadCount = startingThreads;
 
       Log(DEBUG, "UpscalerService",
-          "Submitting task for {} ({}x{}) - VRAM: {:.1f} MB", req.resourceName,
-          header.cols, header.rows, totalVRAM / (1024.0 * 1024.0));
+          "Submitting task for {} ({}x{}) - estVRAM/task: {:.1f} MB, startThreads: {}",
+          req.resourceName, header.cols, header.rows,
+          taskVRAM / (1024.0 * 1024.0), startingThreads);
       header.release();
 
       // Submit task with specific requirements

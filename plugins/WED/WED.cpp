@@ -112,72 +112,105 @@ bool WED::upscale() {
     
     Log(DEBUG, "WED", "Using upscale factor: {}x", upscaleFactor);
     
+    // Track mapping from original tilemap indices to expanded tilemap ranges for overlay 0
+    // This is needed for door tile cells that reference specific tilemap entries
+    std::map<uint16_t, std::pair<uint16_t, uint16_t>> origToExpandedMap; // origIndex -> (startIndex, count)
+
     // Step 1: Expand tilemaps first (before scaling overlay dimensions)
     for (size_t overlayIdx = 0; overlayIdx < wedFile.overlays.size(); overlayIdx++) {
         if (overlayIdx >= wedFile.tilemaps.size()) continue;
-        
+
         const auto& overlay = wedFile.overlays[overlayIdx];
         auto& overlayTilemaps = wedFile.tilemaps[overlayIdx];
-        
+
         size_t origWidth = overlay.width;
         size_t origHeight = overlay.height;
-        
-        Log(DEBUG, "WED", "Expanding tilemap for overlay {}: {}x{} -> {}x{}", 
-            overlayIdx, origWidth, origHeight, 
+
+        Log(DEBUG, "WED", "Expanding tilemap for overlay {}: {}x{} -> {}x{}",
+            overlayIdx, origWidth, origHeight,
             origWidth * upscaleFactor, origHeight * upscaleFactor);
-        
-        // Create expanded tilemap grid
+
+        // Precompute a no-gap sequential mapping for secondary tiles on overlay 0.
+        // Sequence order: dy -> oy -> ox -> dx (only originals that had a secondary)
+        std::vector<uint32_t> secSeqMap; // maps (oy,ox,dy,dx) to new secondary index; 0xFFFFFFFF if none
+        size_t mainTileCountUpscaled = (origWidth * upscaleFactor) * (origHeight * upscaleFactor);
+        if (overlayIdx == 0) {
+            secSeqMap.assign(origWidth * origHeight * upscaleFactor * upscaleFactor, 0xFFFFFFFFu);
+            uint32_t seq = 0;
+            for (uint32_t dy = 0; dy < upscaleFactor; ++dy) {
+                for (size_t oy = 0; oy < origHeight; ++oy) {
+                    for (size_t ox = 0; ox < origWidth; ++ox) {
+                        size_t oi = oy * origWidth + ox;
+                        if (oi < overlayTilemaps.size()) {
+                            const WEDTilemap &otm = overlayTilemaps[oi];
+                            if (otm.secondaryIndex != 0xFFFF) {
+                                for (uint32_t dx = 0; dx < upscaleFactor; ++dx) {
+                                    size_t pos = (((oi * upscaleFactor) + dy) * upscaleFactor) + dx;
+                                    secSeqMap[pos] = static_cast<uint32_t>(mainTileCountUpscaled + seq);
+                                    ++seq;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Log(DEBUG, "WED", "Computed sequential secondary mapping: {} tiles", 
+                std::count_if(secSeqMap.begin(), secSeqMap.end(), [](uint32_t v){return v!=0xFFFFFFFFu;}));
+        }
+
+        // Create expanded tilemap grid in strict row-major order of the upscaled grid
         std::vector<WEDTilemap> newTilemaps;
         newTilemaps.reserve(origWidth * origHeight * upscaleFactor * upscaleFactor);
-        
+
         for (size_t y = 0; y < origHeight; y++) {
-            for (size_t x = 0; x < origWidth; x++) {
-                size_t origIndex = y * origWidth + x;
-                if (origIndex < overlayTilemaps.size()) {
-                    const WEDTilemap& origTilemap = overlayTilemaps[origIndex];
-                    
-                    // Debug: Log original tilemap data for first few tiles
-                    if (origIndex < 5) {
-                        Log(DEBUG, "WED", "Original tilemap[{}]: startIndex={}, tileCount={}, secondaryIndex={}", 
-                            origIndex, origTilemap.startIndex, origTilemap.tileCount, origTilemap.secondaryIndex);
-                    }
-                    
-                    // Create 4x4 block of new tilemaps for this original tile
-                    for (uint32_t dy = 0; dy < upscaleFactor; dy++) {
+            for (uint32_t dy = 0; dy < upscaleFactor; dy++) {
+                for (size_t x = 0; x < origWidth; x++) {
+                    size_t origIndex = y * origWidth + x;
+                    if (origIndex < overlayTilemaps.size()) {
+                        const WEDTilemap& origTilemap = overlayTilemaps[origIndex];
+
+                        // Debug: Log original tilemap data for first few tiles
+                        if (origIndex < 5 && dy == 0) {
+                            Log(DEBUG, "WED", "Original tilemap[{}]: startIndex={}, tileCount={}, secondaryIndex={}",
+                                origIndex, origTilemap.startIndex, origTilemap.tileCount, origTilemap.secondaryIndex);
+                        }
+
                         for (uint32_t dx = 0; dx < upscaleFactor; dx++) {
                             WEDTilemap newTilemap = origTilemap;
-                            
-                            // Use sequential tilemap index - each new tilemap gets the next sequential index
+
+                            // Each new tilemap gets the next sequential index (row-major in upscaled grid)
                             newTilemap.startIndex = static_cast<uint16_t>(newTilemaps.size());
                             newTilemap.tileCount = 1; // Each tilemap now references exactly one tile
 
-                            // Debug: Log what we're copying
-                            if (origIndex < 5 && dy == 0 && dx == 0) {
-                                Log(DEBUG, "WED", "Creating new tilemap from original[{}]: startIndex={}, tileCount={}, secondaryIndex={}", 
-                                    origIndex, newTilemap.startIndex, newTilemap.tileCount, newTilemap.secondaryIndex);
+                            // Handle secondary tile index mapping ONLY for overlay 0 using precomputed sequential map
+                            if (overlayIdx == 0) {
+                                size_t oi = y * origWidth + x;
+                                size_t pos = (((oi * upscaleFactor) + dy) * upscaleFactor) + dx;
+                                if (pos < secSeqMap.size() && secSeqMap[pos] != 0xFFFFFFFFu) {
+                                    newTilemap.secondaryIndex = static_cast<uint16_t>(secSeqMap[pos]);
+                                } else {
+                                    newTilemap.secondaryIndex = 0xFFFF;
+                                }
                             }
-                            
-                            // Handle secondary tile index mapping ONLY for overlay 0 (base layer with secondary tiles)
-                            if (overlayIdx == 0 && origTilemap.secondaryIndex != 0xFFFF) { // -1 means no secondary tile
-                                // Map secondary tile index to the corresponding position in the 4x4 grid
-                                // Each original secondary tile becomes a 4x4 block of secondary tiles
-                                uint16_t secondaryBlockStart = origTilemap.secondaryIndex * upscaleFactor * upscaleFactor;
-                                uint16_t secondaryOffset = dy * upscaleFactor + dx;
-                                newTilemap.secondaryIndex = secondaryBlockStart + secondaryOffset;
-                            }
-                            // For all other overlays or tiles without secondary tiles, preserve original value
-                            
+
                             newTilemaps.push_back(newTilemap);
                         }
                     }
                 }
             }
         }
-        
+
         overlayTilemaps = std::move(newTilemaps);
-        
-        Log(MESSAGE, "WED", "Created {} tilemaps for overlay {} (expected: {}x{} = {})", 
-            overlayTilemaps.size(), overlayIdx, 
+
+        // After creating the primary grid, we previously had an explicit pass to place secondary tiles
+        // for doors that might not be referenced by any primary tilemap entry. That post-pass caused
+        // misaligned rows and incorrect placement in some areas (e.g., AR0020). Since the initial expansion
+        // already sets the correct secondary tiles for door-referenced cells in these cases, we skip the
+        // explicit post-pass placement to preserve correct stacking and position.
+        // If future WEDs need it, we can reintroduce a guarded, position-based placement here.
+
+        Log(MESSAGE, "WED", "Created {} tilemaps for overlay {} (expected: {}x{} = {})",
+            overlayTilemaps.size(), overlayIdx,
             origWidth * upscaleFactor, origHeight * upscaleFactor,
             origWidth * origHeight * upscaleFactor * upscaleFactor);
     }
@@ -218,88 +251,77 @@ bool WED::upscale() {
     }
     
     // Step 4: Update door tile cells to reference expanded tilemap
-    Log(DEBUG, "WED", "Updating door tile cells for expanded tilemap");
+    Log(DEBUG, "WED", "Updating door tile cells for expanded tilemap (per-door rebuild)");
 
-    // Door tile cells are indices into the tilemap array, not grid coordinates
-    // When we expand from WxH to (W*factor)x(H*factor), each original tilemap index
-    // becomes a factor×factor block of indices in the expanded tilemap
-    // We need to expand each door tile cell to cover its entire corresponding block
+    // Door tile cells are indices into the tilemap array. We must expand them per-door so that
+    // firstDoorTile offsets remain correct after expansion. Each original entry expands to factor×factor
+    // contiguous positions based on its original (x,y).
     if (!wedFile.overlays.empty()) {
         size_t origWidth = wedFile.overlays[0].width / upscaleFactor;  // Original width before scaling
         size_t origHeight = wedFile.overlays[0].height / upscaleFactor; // Original height before scaling
         size_t newWidth = wedFile.overlays[0].width;                   // Current (scaled) width
         size_t newHeight = wedFile.overlays[0].height;                 // Current (scaled) height
 
-        // Create new door tile cells array with expanded coverage
-        std::vector<uint16_t> newDoorTileCells;
-        size_t originalDoorTileCount = wedFile.doorTileCells.size();
+        std::vector<uint16_t> rebuiltDoorTileCells;
+        rebuiltDoorTileCells.reserve(wedFile.doorTileCells.size() * upscaleFactor * upscaleFactor);
 
-        Log(DEBUG, "WED", "Expanding door tile cells: {} original -> {} expected",
-            originalDoorTileCount, originalDoorTileCount * upscaleFactor * upscaleFactor);
+        size_t writeOffset = 0; // new offset into rebuiltDoorTileCells
 
-        for (size_t doorTileIdx = 0; doorTileIdx < originalDoorTileCount; doorTileIdx++) {
-            uint16_t origTilemapIndex = wedFile.doorTileCells[doorTileIdx];
+        for (size_t doorIdx = 0; doorIdx < wedFile.doors.size(); ++doorIdx) {
+            auto& door = wedFile.doors[doorIdx];
 
-            // Convert tilemap index to 2D coordinates in original grid
-            size_t origY = origTilemapIndex / origWidth;
-            size_t origX = origTilemapIndex % origWidth;
+            uint16_t origFirst = door.firstDoorTile;
+            uint16_t origCount = door.doorTileCount;
 
-            // Validate coordinates are within original bounds
-            if (origY >= origHeight || origX >= origWidth) {
-                Log(WARNING, "WED", "Door tile cell {} has invalid tilemap index {} (max: {})",
-                    doorTileIdx, origTilemapIndex, origWidth * origHeight - 1);
-                continue;
-            }
+            // New first offset is current write position
+            door.firstDoorTile = static_cast<uint16_t>(writeOffset);
 
-            
+            // Expand each original cell referenced by this door
+            for (uint16_t i = 0; i < origCount; ++i) {
+                size_t doorTileIdx = static_cast<size_t>(origFirst) + i;
+                if (doorTileIdx >= wedFile.doorTileCells.size()) {
+                    Log(ERROR, "WED", "Door {} references invalid doorTileIdx {} (max: {})",
+                        doorIdx, doorTileIdx, wedFile.doorTileCells.size() - 1);
+                    continue;
+                }
 
-            // Generate factor×factor block of tilemap indices in expanded grid
-            for (uint32_t dy = 0; dy < upscaleFactor; dy++) {
-                for (uint32_t dx = 0; dx < upscaleFactor; dx++) {
-                    // Calculate position in expanded grid
-                    size_t newY = origY * upscaleFactor + dy;
-                    size_t newX = origX * upscaleFactor + dx;
+                uint16_t origTilemapIndex = wedFile.doorTileCells[doorTileIdx];
 
-                    // Convert back to tilemap index in expanded grid
-                    size_t newTilemapIndex = newY * newWidth + newX;
+                // Calculate original x, y from tilemap index
+                size_t origX = origTilemapIndex % origWidth;
+                size_t origY = origTilemapIndex / origWidth;
 
-                    // Validate the new index is within bounds
-                    if (newTilemapIndex >= newWidth * newHeight) {
-                        Log(ERROR, "WED", "Generated invalid tilemap index {} (max: {}) for door tile cell {}",
-                            newTilemapIndex, newWidth * newHeight - 1, doorTileIdx);
-                        continue;
+                // Add all factor×factor positions for this original tile in row-major order of the upscaled grid
+                for (uint32_t dy = 0; dy < upscaleFactor; ++dy) {
+                    for (uint32_t dx = 0; dx < upscaleFactor; ++dx) {
+                        size_t newX = origX * upscaleFactor + dx;
+                        size_t newY = origY * upscaleFactor + dy;
+                        uint32_t newTilemapIndex = static_cast<uint32_t>(newY * newWidth + newX);
+
+                        if (newTilemapIndex >= newWidth * newHeight) {
+                            Log(ERROR, "WED", "Generated invalid tilemap index {} (max: {}) for door {} cell {}",
+                                newTilemapIndex, newWidth * newHeight - 1, doorIdx, i);
+                            continue;
+                        }
+
+                        rebuiltDoorTileCells.push_back(static_cast<uint16_t>(newTilemapIndex));
+                        ++writeOffset;
                     }
-
-                    newDoorTileCells.push_back(static_cast<uint16_t>(newTilemapIndex));
                 }
             }
-        }
 
-        // Replace old door tile cells with expanded version
-        wedFile.doorTileCells = std::move(newDoorTileCells);
+            uint16_t newCount = static_cast<uint16_t>(origCount * upscaleFactor * upscaleFactor);
+            door.doorTileCount = newCount;
 
-        Log(DEBUG, "WED", "Expanded door tile cells: {} -> {} (factor: {}x)",
-            originalDoorTileCount, wedFile.doorTileCells.size(), upscaleFactor);
-
-        // Update door tile cell counts for each door
-        for (size_t doorIdx = 0; doorIdx < wedFile.doors.size(); doorIdx++) {
-            auto& door = wedFile.doors[doorIdx];
-            
-            // Calculate new counts based on upscale factor
-            uint16_t originalDoorTileCount = door.doorTileCount;
-            
-            door.doorTileCount = originalDoorTileCount * upscaleFactor * upscaleFactor;
-            
             std::string doorName = door.getName();
-            Log(DEBUG, "WED", "Door {}: Name='{}' TileCount={}->{}  State={} FirstTile={}", 
-                doorIdx, doorName.c_str(), originalDoorTileCount, door.doorTileCount,
-                door.isOpen() ? "OPEN" : "CLOSED", door.firstDoorTile);
-            
-            // Log door polygon information
-            Log(DEBUG, "WED", "Door {}: Open polygons: offset={} count={}, Closed polygons: offset={} count={}", 
-                doorIdx, door.openPolygonOffset, door.openPolygonCount,
-                door.closedPolygonOffset, door.closedPolygonCount);
+            Log(DEBUG, "WED", "Door {}: '{}' firstDoorTile={} count={}",
+                doorIdx, doorName.c_str(), door.firstDoorTile, door.doorTileCount);
         }
+
+        // Replace old door tile cells with per-door rebuilt version
+        wedFile.doorTileCells = std::move(rebuiltDoorTileCells);
+        Log(DEBUG, "WED", "Rebuilt door tile cells: {} entries",
+            wedFile.doorTileCells.size());
     }
     
     // Step 5: Recalculate wall groups for new overlay dimensions
