@@ -1,6 +1,13 @@
 #ifndef TISV2_HPP
 #define TISV2_HPP
 
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
+#include "plugins/TIS/TISV1.hpp"
+
 namespace ProjectIE4k {
 
 // TIS V2 file structure (PVRZ-based)
