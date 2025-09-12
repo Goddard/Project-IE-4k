@@ -13,24 +13,38 @@ struct SearchMap {
     SearchMap() : width(0), height(0) {}
     SearchMap(uint32_t w, uint32_t h) : width(w), height(h), data((w * h + 1) / 2, 0) {}
     
+    // Helpers for packed 4-bit (BMP stores left pixel in HIGH nibble, right pixel in LOW nibble)
+    inline uint8_t readNibble(size_t index) const {
+        size_t byteIndex = index / 2;
+        bool left = (index % 2 == 0); // even index -> left pixel -> high nibble
+        uint8_t byte = data[byteIndex];
+        return left ? ((byte >> 4) & 0x0F) : (byte & 0x0F);
+    }
+    inline void writeNibble(std::vector<uint8_t>& buf, size_t index, uint8_t value) const {
+        value &= 0x0F;
+        size_t byteIndex = index / 2;
+        bool left = (index % 2 == 0);
+        uint8_t byte = buf[byteIndex];
+        if (left) {
+            byte = (uint8_t)((byte & 0x0F) | (value << 4));
+        } else {
+            byte = (uint8_t)((byte & 0xF0) | value);
+        }
+        buf[byteIndex] = byte;
+    }
+    
     // Get a 4-bit value at position (x, y)
     uint8_t getValue(uint32_t x, uint32_t y) const {
         if (x >= width || y >= height) return 0;
-        size_t index = y * width + x;
-        size_t byteIndex = index / 2;
-        size_t bitOffset = (index % 2) * 4;
-        return (data[byteIndex] >> bitOffset) & 0x0F;
+        size_t index = (size_t)y * width + (size_t)x;
+        return readNibble(index);
     }
     
     // Set a 4-bit value at position (x, y)
     void setValue(uint32_t x, uint32_t y, uint8_t value) {
         if (x >= width || y >= height) return;
-        value &= 0x0F; // Ensure 4-bit value
-        size_t index = y * width + x;
-        size_t byteIndex = index / 2;
-        size_t bitOffset = (index % 2) * 4;
-        uint8_t mask = 0x0F << bitOffset;
-        data[byteIndex] = (data[byteIndex] & ~mask) | (value << bitOffset);
+        size_t index = (size_t)y * width + (size_t)x;
+        writeNibble(data, index, value);
     }
     
     // Serialize to binary data
@@ -161,16 +175,131 @@ struct SearchMap {
                 uint32_t srcX = x / factor;
                 uint32_t srcY = y / factor;
                 uint8_t value = getValue(srcX, srcY);
-                
-                // Set value in new data
-                size_t index = y * newWidth + x;
-                size_t byteIndex = index / 2;
-                size_t bitOffset = (index % 2) * 4;
-                uint8_t mask = 0x0F << bitOffset;
-                newData[byteIndex] = (newData[byteIndex] & ~mask) | (value << bitOffset);
+                size_t index = (size_t)y * newWidth + (size_t)x;
+                writeNibble(newData, index, value);
             }
         }
         
+        width = newWidth;
+        height = newHeight;
+        data = std::move(newData);
+    }
+
+    // Upscale with thin-lane preservation
+    // 1) Nearest-neighbor upscale
+    // 2) Dilate passable mask by a small radius to avoid pinching narrow corridors
+    // blockedValue: value considered non-walkable (default 0x0F per common IE convention)
+    // openFillValue: value to assign for newly opened pixels (default 0x00 fully walkable)
+    void upscalePreserveLanes(uint32_t factor, uint8_t blockedValue = 0x0F, uint8_t openFillValue = 0x00, int dilationIters = 1) {
+        if (factor <= 1) return;
+
+        // Step 1: regular upscale
+        uint32_t newWidth = width * factor;
+        uint32_t newHeight = height * factor;
+        std::vector<uint8_t> upscaled((newWidth * newHeight + 1) / 2, 0);
+
+        for (uint32_t y = 0; y < newHeight; y++) {
+            for (uint32_t x = 0; x < newWidth; x++) {
+                uint32_t srcX = x / factor;
+                uint32_t srcY = y / factor;
+                uint8_t value = getValue(srcX, srcY);
+                size_t index = (size_t)y * newWidth + (size_t)x;
+                writeNibble(upscaled, index, value);
+            }
+        }
+
+        // Step 2: build passable mask and dilate to preserve thin lanes
+        std::vector<uint8_t> mask(newWidth * newHeight, 0);
+        for (uint32_t y = 0; y < newHeight; ++y) {
+            for (uint32_t x = 0; x < newWidth; ++x) {
+                size_t idx = (size_t)y * newWidth + (size_t)x;
+                uint8_t v = readNibble(idx);
+                mask[idx] = (v != blockedValue) ? 1 : 0;
+            }
+        }
+
+        auto inBounds = [&](int xx, int yy){ return xx >= 0 && yy >= 0 && (uint32_t)xx < newWidth && (uint32_t)yy < newHeight; };
+
+        // Simple 8-connected dilation for passable cells
+        for (int it = 0; it < dilationIters; ++it) {
+            std::vector<uint8_t> next = mask;
+            for (int yy = 0; yy < (int)newHeight; ++yy) {
+                for (int xx = 0; xx < (int)newWidth; ++xx) {
+                    size_t idx = (size_t)yy * newWidth + (size_t)xx;
+                    if (mask[idx]) { next[idx] = 1; continue; }
+                    // If any neighbor is passable, make this passable
+                    bool neigh = false;
+                    for (int dy = -1; dy <= 1 && !neigh; ++dy) {
+                        for (int dx = -1; dx <= 1 && !neigh; ++dx) {
+                            if (dx == 0 && dy == 0) continue;
+                            int nx = xx + dx, ny = yy + dy;
+                            if (inBounds(nx, ny)) {
+                                if (mask[(size_t)ny * newWidth + (size_t)nx]) neigh = true;
+                            }
+                        }
+                    }
+                    if (neigh) next[idx] = 1;
+                }
+            }
+            mask.swap(next);
+        }
+
+        // Step 3: write back. Preserve existing values; for newly opened cells, assign openFillValue
+        for (uint32_t y = 0; y < newHeight; ++y) {
+            for (uint32_t x = 0; x < newWidth; ++x) {
+                size_t idx = (size_t)y * newWidth + (size_t)x;
+                uint8_t cur = readNibble(idx);
+                if (mask[idx] && cur == blockedValue) {
+                    uint8_t nv = openFillValue & 0x0F;
+                    writeNibble(upscaled, idx, nv);
+                }
+            }
+        }
+
+        width = newWidth;
+        height = newHeight;
+        data = std::move(upscaled);
+    }
+
+    // Upscale with conservative neighborhood sampling: for each destination pixel,
+    // map to source (sx, sy) and assign the MIN value in a (2*r+1)^2 neighborhood around (sx, sy).
+    // This biases toward keeping walkable values when there is any thin connection nearby.
+    void upscaleConservative(uint32_t factor, int neighborhoodRadius = 1) {
+        if (factor <= 1) return;
+        if (neighborhoodRadius < 0) neighborhoodRadius = 0;
+
+        const uint32_t newWidth = width * factor;
+        const uint32_t newHeight = height * factor;
+        std::vector<uint8_t> newData((newWidth * newHeight + 1) / 2, 0);
+
+        auto sampleMinInNeighborhood = [&](uint32_t sx, uint32_t sy) -> uint8_t {
+            uint8_t best = 0x0F;
+            int r = neighborhoodRadius;
+            for (int dy = -r; dy <= r; ++dy) {
+                int y = (int)sy + dy;
+                if (y < 0 || (uint32_t)y >= height) continue;
+                for (int dx = -r; dx <= r; ++dx) {
+                    int x = (int)sx + dx;
+                    if (x < 0 || (uint32_t)x >= width) continue;
+                    uint8_t v = getValue((uint32_t)x, (uint32_t)y) & 0x0F;
+                    if (v < best) best = v;
+                    if (best == 0) return best; // early exit
+                }
+            }
+            return best;
+        };
+
+        for (uint32_t y = 0; y < newHeight; ++y) {
+            for (uint32_t x = 0; x < newWidth; ++x) {
+                uint32_t sx = x / factor;
+                uint32_t sy = y / factor;
+                uint8_t value = sampleMinInNeighborhood(sx, sy);
+
+                size_t index = (size_t)y * newWidth + (size_t)x;
+                writeNibble(newData, index, value & 0x0F);
+            }
+        }
+
         width = newWidth;
         height = newHeight;
         data = std::move(newData);

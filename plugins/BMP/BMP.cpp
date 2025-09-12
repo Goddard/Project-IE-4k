@@ -382,10 +382,12 @@ bool BMP::upscaleAreaMapBmp() {
         
         Log(DEBUG, "BMP", "Search map loaded: {}x{}", searchMap.width, searchMap.height);
         
-        // Upscale the search map
+        // Upscale the search map with exact nearest-neighbor replication for maximum fidelity.
+        // This preserves the original 4-bit values exactly (each source pixel becomes a factor x factor block).
+        // If future tuning is needed, we can expose a CFG switch to enable upscaleConservative.
         searchMap.upscale(upscaleFactor);
         
-        Log(DEBUG, "BMP", "Search map upscaled to: {}x{}", searchMap.width, searchMap.height);
+        Log(DEBUG, "BMP", "Search map upscaled (exact NN) to: {}x{}", searchMap.width, searchMap.height);
         
         // Serialize the upscaled search map
         std::vector<uint8_t> upscaledData = searchMap.serialize();
