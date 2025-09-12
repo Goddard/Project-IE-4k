@@ -69,6 +69,12 @@ bool ResourceCoordinatorService::hasResource(const std::string& resourceName, SC
         return true;
     }
 
+    // Then check unhardcoded shared directory (third priority)
+    if (hasResourceInUnhardcodedShared(resourceName, resourceType)) {
+        Log(DEBUG, "ResourceCoordinatorService", "Found resource '{}' in unhardcoded shared directory", resourceName);
+        return true;
+    }
+
     // Finally check BIF files (lowest priority)
     if (keyService && keyService->hasResource(resourceName, resourceType)) {
         return true;
@@ -96,6 +102,26 @@ ResourceData ResourceCoordinatorService::getResourceData(const std::string& reso
         std::string normalizedName = normalizeResourceName(resourceName);
         auto it = overrideFileMap.find(std::make_pair(normalizedName, resourceType));
         if (it != overrideFileMap.end()) {
+            const OverrideFileInfo& fileInfo = it->second;
+            std::string filename = fileInfo.originalFilename;
+            return ResourceData(data, filename);
+        } else {
+            // Fallback: construct filename using SClass extension
+            std::string extension = SClass::getExtension(resourceType);
+            std::string filename = resourceName + "." + extension;
+            return ResourceData(data, filename);
+        }
+    }
+
+    // Then check unhardcoded shared directory (third priority)
+    if (hasResourceInUnhardcodedShared(resourceName, resourceType)) {
+        Log(DEBUG, "ResourceCoordinatorService", "Loading resource '{}' from unhardcoded shared directory", resourceName);
+        std::vector<uint8_t> data = getResourceDataFromUnhardcodedShared(resourceName, resourceType);
+
+        // For unhardcoded shared files, get the actual filename from the unhardcoded shared file map
+        std::string normalizedName = normalizeResourceName(resourceName);
+        auto it = unhardcodedSharedFileMap.find(std::make_pair(normalizedName, resourceType));
+        if (it != unhardcodedSharedFileMap.end()) {
             const OverrideFileInfo& fileInfo = it->second;
             std::string filename = fileInfo.originalFilename;
             return ResourceData(data, filename);

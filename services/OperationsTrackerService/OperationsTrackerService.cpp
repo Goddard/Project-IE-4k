@@ -2,13 +2,15 @@
 
 #include <filesystem>
 #include <chrono>
+#include <future>
+#include <algorithm>
 #include <thread>
-
 #include <nlohmann/json.hpp>
 
 #include "core/GlobalContext.h"
 #include "core/Logging/Logging.h"
 #include "core/CFG.h"
+#include "core/OperationsMonitor/OperationsMonitor.h"
 
 namespace fs = std::filesystem;
 namespace ProjectIE4k {
@@ -25,6 +27,23 @@ static std::string nowIso8601() {
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t));
 #endif
     return std::string(buf);
+}
+
+void OperationsTrackerService::flushPendingUnsafe() {
+    if (!dirty_ || pendingLines_.empty()) return;
+    std::string opsDir = getOpsDirUnsafe();
+    fs::path ledgerPath = fs::path(opsDir) / "ops.jsonl";
+    std::ofstream out(ledgerPath, std::ios::app);
+    if (!out.is_open()) {
+        Log(ERROR, "OperationsTrackerService", "Failed to open ledger for flush: {}", ledgerPath.string());
+        return;
+    }
+    for (const auto &l : pendingLines_) {
+        out << l << '\n';
+    }
+    out.flush();
+    pendingLines_.clear();
+    dirty_ = false;
 }
 
 void OperationsTrackerService::initializeForResourceType(SClass_ID resourceType) {
@@ -48,6 +67,10 @@ void OperationsTrackerService::onLifecycleEvent(ServiceLifecycle event, const st
     if (event == ServiceLifecycle::APPLICATION_START) {
         std::lock_guard<std::mutex> lock(mtx_);
         ensureLedgerOpen();
+        // Build cache now in a blocking, exclusive fashion (parallelized internally)
+        if (!cacheLoaded_) {
+            buildCacheBlocking();
+        }
         
         // Register context provider for --force flag
         GlobalContext::getInstance().registerContextProvider("OperationsTracker", 
@@ -61,6 +84,11 @@ void OperationsTrackerService::onLifecycleEvent(ServiceLifecycle event, const st
             });
     }
     if (event == ServiceLifecycle::APPLICATION_SHUTDOWN) {
+        // Flush pending JSONL lines once at shutdown to avoid intermittent I/O contention
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            flushPendingUnsafe();
+        }
         cleanup();
     }
 }
@@ -82,13 +110,6 @@ void OperationsTrackerService::ensureLedgerOpen() {
     if (!ledger_.is_open()) {
         Log(ERROR, "OperationsTrackerService", "Failed to open ledger: {}", ledgerPath.string());
     }
-    
-    if (!cacheLoaded_) {
-        // Start background thread to load cache
-        std::thread([this, ledgerPath]() {
-            loadLedgerIntoCacheUnsafe();
-        }).detach();
-    }
 }
 
 void OperationsTrackerService::loadLedgerIntoCacheUnsafe() {
@@ -98,7 +119,6 @@ void OperationsTrackerService::loadLedgerIntoCacheUnsafe() {
         
         std::ifstream in(ledgerPath);
         if (!in.is_open()) {
-            cacheLoaded_ = true;
             return;
         }
         
@@ -189,15 +209,139 @@ void OperationsTrackerService::loadLedgerIntoCacheUnsafe() {
     } catch (...) {
         // ignore parsing errors
     }
-    
+}
+
+void OperationsTrackerService::buildCacheBlocking() {
+    // Read entire ledger to memory
+    std::string opsDir = getOpsDirUnsafe();
+    fs::path ledgerPath = fs::path(opsDir) / "ops.jsonl";
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(ledgerPath);
+        if (in.is_open()) {
+            std::string line;
+            while (std::getline(in, line)) {
+                if (!line.empty()) lines.emplace_back(std::move(line));
+            }
+        }
+    }
+
+    // Ensure OperationsMonitor is initialized before submitting tasks
+    auto &monitor = OperationsMonitor::getInstance();
+    if (!monitor.isInitialized()) {
+        monitor.initialize();
+    }
+
+    size_t total = lines.size();
+    if (total == 0) {
+        cacheLoaded_ = true;
+        return;
+    }
+
+    size_t chunks = std::min<size_t>(std::max<unsigned>(1, std::thread::hardware_concurrency() * 2), total);
+    size_t chunkSize = (total + chunks - 1) / chunks;
+
+    std::vector<std::future<std::unordered_map<std::string, LatestEntry>>> futures;
+    futures.reserve(chunks);
+
+    for (size_t c = 0; c < chunks; ++c) {
+        size_t begin = c * chunkSize;
+        if (begin >= total) break;
+        size_t end = std::min(begin + chunkSize, total);
+
+        auto task = [begin, end, &lines]() -> std::unordered_map<std::string, LatestEntry> {
+            std::unordered_map<std::string, LatestEntry> local;
+            local.reserve((end - begin) * 2);
+            for (size_t i = begin; i < end; ++i) {
+                const std::string &line = lines[i];
+                auto getField = [&](const std::string& key) -> std::string {
+                    std::string pat = "\"" + key + "\":";
+                    size_t pos = line.find(pat);
+                    if (pos == std::string::npos) return "";
+                    pos += pat.size();
+                    if (pos < line.size() && line[pos] == '"') {
+                        size_t endq = line.find('"', pos + 1);
+                        if (endq != std::string::npos) return line.substr(pos + 1, endq - (pos + 1));
+                        return "";
+                    } else {
+                        size_t endc = line.find_first_of(",}\n", pos);
+                        if (endc == std::string::npos) endc = line.size();
+                        return line.substr(pos, endc - pos);
+                    }
+                };
+
+                auto event = getField("event");
+                if (event != "start" && event != "end") continue;
+                std::string phase = getField("phase");
+                std::string resourceType = getField("resourceType");
+                std::string resourceName = getField("resourceName");
+                if (phase.empty() || resourceType.empty() || resourceName.empty()) continue;
+                std::string key = phase + "|" + resourceType + "|" + resourceName;
+
+                if (event == "start") {
+                    LatestEntry &entry = local[key];
+                    entry.configHash = getField("configHash");
+                    entry.opVersion = getField("opVersion");
+                    auto parseUint = [&](const std::string& k) -> uint64_t {
+                        std::string v = getField(k);
+                        if (v.empty()) return 0;
+                        try { return static_cast<uint64_t>(std::stoull(v)); } catch (...) { return 0; }
+                    };
+                    auto parseInt = [&](const std::string& k) -> int64_t {
+                        std::string v = getField(k);
+                        if (v.empty()) return 0;
+                        try { return static_cast<int64_t>(std::stoll(v)); } catch (...) { return 0; }
+                    };
+                    entry.bifIndex = static_cast<int>(parseInt("bifIndex"));
+                    entry.keyLocator = static_cast<uint32_t>(parseUint("keyLocator"));
+                    entry.size = static_cast<uint32_t>(parseUint("size"));
+                    entry.sourcePath = getField("sourcePath");
+                    entry.mtime = parseUint("mtime");
+                    entry.overrideSize = parseUint("overrideSize");
+                } else if (event == "end") {
+                    bool success = false;
+                    std::string s = getField("success");
+                    if (!s.empty()) success = (s.find("true") != std::string::npos || s == "1");
+                    auto it = local.find(key);
+                    if (it == local.end()) {
+                        local.emplace(key, LatestEntry{.success = success});
+                    } else {
+                        it->second.success = success;
+                    }
+                }
+            }
+            return local;
+        };
+
+        OperationRequirements requirements;
+        requirements.operationType = "ops_tracker_build";
+        requirements.resourceName = "ops.jsonl";
+        requirements.startingThreadCount = static_cast<int>(std::max<unsigned>(1, std::thread::hardware_concurrency()));
+        requirements.priority = TaskPriority::HIGH;
+        requirements.resourceAccess = ResourceAccess::SHARED;
+        requirements.blocking = true;
+        requirements.saveProfile = false;
+
+        auto fut = monitor.submitTaskWithRequirements(std::move(task), requirements);
+        futures.emplace_back(std::move(fut));
+    }
+
+    // Merge
+    for (auto &f : futures) {
+        auto part = f.get();
+        for (auto &kv : part) {
+            latestCache_[kv.first] = std::move(kv.second);
+        }
+    }
+
     cacheLoaded_ = true;
-    Log(DEBUG, "OperationsTrackerService", "Background cache loading completed");
+    Log(DEBUG, "OperationsTrackerService", "Cache build complete: {} entries", latestCache_.size());
 }
 
 void OperationsTrackerService::writeJsonlUnsafe(const std::string& line) {
-    if (!ledger_.is_open()) return;
-    ledger_ << line << '\n';
-    ledger_.flush();
+    // Buffer lines in-memory; flush once during shutdown
+    pendingLines_.push_back(line);
+    dirty_ = true;
 }
 
 std::string OperationsTrackerService::makeKey(const std::string& phase, const std::string& resourceType, const std::string& resourceName) const {

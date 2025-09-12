@@ -73,6 +73,8 @@ private:
     void writeJsonlUnsafe(const std::string& line);
     std::string makeKey(const std::string& phase, const std::string& resourceType, const std::string& resourceName) const;
     void loadLedgerIntoCacheUnsafe();
+    void buildCacheBlocking();
+    void flushPendingUnsafe();
 
     struct LatestEntry {
         std::string configHash;
@@ -95,8 +97,8 @@ private:
     mutable std::mutex mtx_;
     std::ofstream ledger_;
     bool cacheLoaded_ = false;
+    bool dirty_ = false; // whether we have pending appends to write
+    std::vector<std::string> pendingLines_; // buffered JSONL lines to flush on shutdown
 };
 
 } // namespace ProjectIE4k
-
-
