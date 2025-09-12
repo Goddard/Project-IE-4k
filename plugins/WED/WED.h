@@ -1,12 +1,12 @@
 #pragma once
 
-#include "WEDV1.3.hpp"
-
 #include <string>
 
 #include "core/SClassID.h"
 #include "plugins/PluginBase.h"
 #include "plugins/CommandRegistry.h"
+#include "WEDV1.3.hpp"
+#include "WEDV1.4.hpp"
 
 namespace ProjectIE4k {
 
@@ -34,8 +34,6 @@ public:
     bool upscaleAll() override;
     bool assembleAll() override;
 
-
-
     // Clean directories before operations - operation-specific
     bool cleanExtractDirectory() override;
     bool cleanUpscaleDirectory() override;
@@ -56,13 +54,20 @@ public:
     
     // Save to file
     bool saveToFile(const std::string& filePath) const;
+    bool saveToFile13(const std::string& filePath) const;
+
+    bool upscale13();
     
     // File data access
-    const WEDFile& getWedFile() const { return wedFile; }
-    WEDFile& getWedFile() { return wedFile; }
+    const WEDFile& getWedFile13() const { return wedFile13; }
+    WEDFile& getWedFile13() { return wedFile13; }
+    // File data access (use V1.4 in-memory; deserializer supports V1.3 and V1.4)
+    const WEDFileV14& getWedFile() const { return wedFile; }
+    WEDFileV14& getWedFile() { return wedFile; }
 
 private:
-    WEDFile wedFile;
+    WEDFileV14 wedFile;
+    WEDFile wedFile13;
 
     // Helper methods
     bool upscaleTileMap();
