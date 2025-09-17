@@ -545,7 +545,7 @@ void ARE::registerCommands(CommandTable& commandTable) {
                         std::cerr << "Usage: are extract <resource_name>" << std::endl;
                         return 1;
                     }
-                    return ProjectIE4k::PluginManager::getInstance().extractResource(args[0], IE_ARE_CLASS_ID) ? 0 : 1;
+                    return PluginManager::getInstance().extractResource(args[0], IE_ARE_CLASS_ID) ? 0 : 1;
                 }
             }},
             {"upscale", {
@@ -555,7 +555,7 @@ void ARE::registerCommands(CommandTable& commandTable) {
                         std::cerr << "Usage: are upscale <resource_name>" << std::endl;
                         return 1;
                     }
-                    return ProjectIE4k::PluginManager::getInstance().upscaleResource(args[0], IE_ARE_CLASS_ID) ? 0 : 1;
+                    return PluginManager::getInstance().upscaleResource(args[0], IE_ARE_CLASS_ID) ? 0 : 1;
                 }
             }},
             {"assemble", {
@@ -565,7 +565,7 @@ void ARE::registerCommands(CommandTable& commandTable) {
                         std::cerr << "Usage: are assemble <resource_name>" << std::endl;
                         return 1;
                     }
-                    return ProjectIE4k::PluginManager::getInstance().assembleResource(args[0], IE_ARE_CLASS_ID) ? 0 : 1;
+                    return PluginManager::getInstance().assembleResource(args[0], IE_ARE_CLASS_ID) ? 0 : 1;
                 }
             }}
         }

@@ -1,18 +1,18 @@
-
 #pragma once
 
-#include "../../core/Logging/Logger.h"
-#include "WEDV1.3.hpp"
+#include <cstdint>
 #include <vector>
 #include <cstring>
 #include <cstring>
 #include <string>
 
+#include "core/Logging/Logging.h"
+
 /*
  WED V1.4 format notes (differences vs V1.3)
  
  - Version string:
-   * V1.4 uses header version "V1.4" (first 8 bytes are "WED \0V1.4").
+   * V1.4 uses header version "V1.4" (first 8 bytes are "WED " "V1.4").
  
  - Widened fields and on-disk sizes:
    * Tilemap entries: WEDTilemapV14 widens startIndex, tileCount, secondaryIndex to uint32
@@ -35,7 +35,21 @@
  - Behavioral implications:
    * V1.3 overlay/door indices can roll over modulo 65536 due to uint16 storage
    * V1.4 eliminates rollover by widening to uint32; supports >65k tilemaps and indices, suitable for 4x upscales
-   * Only a few areas so far that I have checked caused this requirement in BG2.  Not sure of other games yet.
+  * Only a few areas so far that I have checked caused this requirement in BG2.  Not sure of other games yet.
+
+ - Section ordering reminder (as used by serializer):
+   * overlays table
+   * secondary header
+   * doors table
+   * door tile cells (uint32 each in V1.4)
+   * wall groups (4 bytes per entry)
+   * polygons (18 bytes each)
+   * polygon indices PLT (uint16 entries; total count == sum of polygon.vertexCount)
+   * vertices (4 bytes per vertex)
+
+ - PLT construction in V1.4 upscaled output:
+   * We rebuild PLT as the concatenation of per-polygon vertex index ranges: [startVertex .. startVertex + vertexCount)
+   * Stored as uint16 indices; we validate that sum(vertexCount) equals the PLT entry count
 */
 
 namespace ProjectIE4k {
