@@ -72,14 +72,16 @@ You also need to have cuda installed if you have an Nvidia GPU.  If you have an 
 
 ## Roadmap
     Rules System
-      RuleEngine - 50% - Rule system allows basic file operation skipping but is not super advanced yet.
+      RuleEngine - 30% - Rule system allows basic file operation skipping but is not super advanced yet.
     Python Support
       - Add the ability for people to create python scripts that perform additional operations.
     Resume Operations
       - Resume 80% - Resume now works, if you want to run an operation and disregard resume use --force
     Mass Convert - PIE4k
+      - 2DA  100% - Extract,Upscale,Assemble
+      - GAM  100% - Extract,Upscale,Assemble
       - MOS  100% - Extract,Upscale,Assemble
-      - BAM  100% - Extract,Upscale,Assemble
+      - BAM   98% - Extract,Upscale,Assemble - still some issues to work through.
       - TIS   90% - Extract,Upscale,Assemble - while everything works it could still be optimized for improved utilization.
       - ARE  100% - Extract,Upscale,Assemble
       - BCS   95% - Extract,Upscale,Assemble - Better support has been added, but still need a little more work to ensure only some functions are upscaled
@@ -90,9 +92,11 @@ You also need to have cuda installed if you have an Nvidia GPU.  If you have an 
       - PNG  100% - Extract,Upscale,Assemble
       - PVRZ 100% - File format is more of a child secondary to other file types so no direct operations
       - WED  100% - Extract,Upscale,Assemble
+      - WMP   90% - Extract,Upscale,Assemble - Works, but maybe some issue with gemrb or pie4k files not sure yet
+      - MVE  100% - Extract,Upscale,Assemble
     GemRB - Modify GemRB allowing upscaled assets to run properly
-      - 50% - Use UpScaleFactor for actors, projectiles, and ovarlays that are specific to engine and not files.
-      - 85% - Add Zoom In/Out - mostly working with 4k assets, but has some issues when zoomed in for normal assets.
+      - 70% - Use UpScaleFactor for actors, projectiles, and ovarlays that are specific to engine and not files.
+      - 95% - Add Zoom In/Out - mostly working with 4k assets, but has some issues when zoomed in for normal assets.
     Plugin System
       - All file types supported "plugins" currently and most fit the mold with some secondary "plugins" that kinda don't yet.
     Services System
