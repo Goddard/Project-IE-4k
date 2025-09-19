@@ -15,6 +15,8 @@
 #include "core/SClassID.h"
 #include "core/CFG.h"       // For PIE4K_CFG
 #include "plugins/CommandRegistry.h"
+#include "services/ServiceManager.h"
+#include "services/ResourceService/ResourceCoordinatorService.h"
 
 namespace ProjectIE4k {
 
@@ -49,6 +51,67 @@ bool BMP::upscale() {
     if (!valid_) {
         Log(ERROR, "BMP", "BMP file not loaded or invalid");
         return false;
+    }
+    
+    // Check if this is a multi-resolution set (L/M/S pattern)
+    if (isMultiResolutionSet()) {
+        std::string suffix = getResolutionSuffix();
+        
+        if (suffix == "M" || suffix == "S") {
+            // For M/S versions, upscale the L version instead
+            std::string baseName = getBaseName();
+            // since we skip resource coordinator service that normalizes paths we need to do it here
+            std::transform(baseName.begin(), baseName.end(), baseName.begin(), ::toupper);
+            std::string largeVersion = baseName + "L";
+            
+            Log(MESSAGE, "BMP", "Multi-resolution {} version detected, upscaling L version instead: {} -> {}", 
+                suffix, resourceName_, largeVersion);
+            
+            // Create a BMP instance for the L version and upscale it
+            BMP largeBmp(largeVersion);
+            if (!largeBmp.isValid()) {
+                Log(ERROR, "BMP", "Failed to load L version for multi-resolution set: {}", largeVersion);
+                return false;
+            }
+            
+            // Check if L version is already upscaled
+            std::string largeUpscaledFile = largeBmp.getUpscaledDir(false) + "/" + largeVersion + ".png";
+            bool needsUpscaling = !std::filesystem::exists(largeUpscaledFile);
+            
+            bool success = true;
+            if (needsUpscaling) {
+                // Upscale the L version
+                success = largeBmp.PluginBase::upscale();
+                if (success) {
+                    Log(MESSAGE, "BMP", "Successfully upscaled L version for multi-resolution set: {}", largeVersion);
+                }
+            } else {
+                Log(DEBUG, "BMP", "L version already upscaled, skipping upscaling: {}", largeVersion);
+            }
+            
+            if (success) {
+                // Copy the upscaled L version to the current M/S version's directory
+                std::string currentUpscaledDir = getUpscaledDir(true);
+                std::string currentUpscaledFile = currentUpscaledDir + "/" + resourceName_ + ".png";
+                
+                try {
+                    std::filesystem::copy_file(largeUpscaledFile, currentUpscaledFile, 
+                                             std::filesystem::copy_options::overwrite_existing);
+                    
+                    Log(MESSAGE, "BMP", "Copied upscaled L version to {} version: {} -> {}", 
+                        suffix, largeUpscaledFile, currentUpscaledFile);
+                } catch (const std::filesystem::filesystem_error& e) {
+                    Log(ERROR, "BMP", "Failed to copy upscaled L version to {} version: {}", suffix, e.what());
+                    success = false;
+                }
+            }
+            
+            return success;
+        } else {
+            // For L version, proceed with normal upscaling
+            Log(MESSAGE, "BMP", "Multi-resolution L version detected, using standard AI upscaling: {}", 
+                resourceName_);
+        }
     }
     
     // Check if this is an area map that needs special handling
@@ -102,8 +165,6 @@ std::string BMP::getAssembleDir(bool ensureDir) const {
     if (ensureDir) ensureDirectoryExists(path);
     return path;
 }
-
-
 
 // Clean directories before operations - operation-specific
 bool BMP::cleanExtractDirectory() {
@@ -277,12 +338,6 @@ bool BMP::skipUpscaling() {
         return false;
     }
 }
-
-
-
-
-
-
 
 // Batch operations (implemented by PluginManager)
 bool BMP::extractAll() {
@@ -508,6 +563,62 @@ bool BMP::assembleAreaMapBmp() {
         return false;
     }
 }
+
+// Multi-resolution handling (L/M/S pattern)
+bool BMP::isMultiResolutionSet() const {
+    // Check if resource name ends with L, M, or S
+    if (resourceName_.length() < 2) return false;
+    
+    char lastChar = std::toupper(resourceName_.back());
+    if (lastChar != 'L' && lastChar != 'M' && lastChar != 'S') {
+        return false;
+    }
+    
+    // Get the base name (without L/M/S suffix)
+    std::string baseName = resourceName_.substr(0, resourceName_.length() - 1);
+    std::transform(baseName.begin(), baseName.end(), baseName.begin(), ::toupper);
+    
+    // Check if all three versions (L, M, S) actually exist using ResourceCoordinatorService
+    auto* resourceCoordinator = dynamic_cast<ResourceCoordinatorService*>(
+        ServiceManager::getService("ResourceCoordinatorService"));
+    
+    if (!resourceCoordinator) {
+        Log(DEBUG, "BMP", "ResourceCoordinatorService not available for multi-resolution check");
+        return false;
+    }
+    
+    std::string largeVersion = baseName + "L";
+    std::string mediumVersion = baseName + "M";
+    std::string smallVersion = baseName + "S";
+    
+    bool hasLarge = resourceCoordinator->hasResource(largeVersion, IE_BMP_CLASS_ID);
+    bool hasMedium = resourceCoordinator->hasResource(mediumVersion, IE_BMP_CLASS_ID);
+    bool hasSmall = resourceCoordinator->hasResource(smallVersion, IE_BMP_CLASS_ID);
+    
+    // Only consider it a multi-resolution set if all three versions exist
+    bool isMultiRes = hasLarge && hasMedium && hasSmall;
+    
+    if (isMultiRes) {
+        Log(DEBUG, "BMP", "Multi-resolution set detected: {} (L:{}, M:{}, S:{})", 
+            baseName, hasLarge, hasMedium, hasSmall);
+    }
+    
+    return isMultiRes;
+}
+
+std::string BMP::getBaseName() const {
+    if (!isMultiResolutionSet()) return resourceName_;
+    
+    // Remove the last character (L/M/S) to get base name
+    return resourceName_.substr(0, resourceName_.length() - 1);
+}
+
+std::string BMP::getResolutionSuffix() const {
+    if (!isMultiResolutionSet()) return "";
+    
+    return std::string(1, std::toupper(resourceName_.back()));
+}
+
 
 REGISTER_PLUGIN(BMP, IE_BMP_CLASS_ID);
 

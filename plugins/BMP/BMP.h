@@ -62,6 +62,11 @@ private:
     bool skipUpscaling();
     bool skipPngToBmp();
     
+    // Multi-resolution handling (L/M/S pattern)
+    bool isMultiResolutionSet() const;
+    std::string getBaseName() const;
+    std::string getResolutionSuffix() const;
+    
     // Directory cleaning helper
     bool cleanDirectory(const std::string& dir);
 };
