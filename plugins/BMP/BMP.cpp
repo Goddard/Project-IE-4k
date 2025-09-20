@@ -2,6 +2,7 @@
 #include "SR.hpp"
 #include "LM.hpp"
 #include "HM.hpp"
+#include "LN.hpp"
 
 #include <fstream>
 #include <filesystem>
@@ -306,10 +307,16 @@ bool BMP::isAreaMapFile() const {
     std::string resourceUpper = resourceName_;
     std::transform(resourceUpper.begin(), resourceUpper.end(), resourceUpper.begin(), ::toupper);
     
-    // Check for area map suffixes
-    return resourceUpper.find("SR") != std::string::npos ||  // Search maps
-           resourceUpper.find("LM") != std::string::npos ||  // Light maps  
-           resourceUpper.find("HT") != std::string::npos;    // Height maps
+    // Area maps must start with "AR" (area) and have specific suffixes
+    if (resourceUpper.length() < 3 || resourceUpper.substr(0, 2) != "AR") {
+        return false;
+    }
+    
+    // Check for area map suffixes (only for files starting with AR)
+    return resourceUpper.find("SR") != std::string::npos ||  // Search maps (AR0700SR)
+           resourceUpper.find("LM") != std::string::npos ||  // Light maps (AR0700LM)
+           resourceUpper.find("LN") != std::string::npos ||  // Night light maps (AR0700LN)
+           resourceUpper.find("HT") != std::string::npos;    // Height maps (AR0700HT)
 }
 
 bool BMP::skipUpscaling() {
@@ -499,6 +506,42 @@ bool BMP::upscaleAreaMapBmp() {
         }
         
         Log(DEBUG, "BMP", "Successfully upscaled light map: {} bytes -> {}", upscaledData.size(), upscalePath);
+        return true;
+        
+    } else if (resourceUpper.find("LN") != std::string::npos) {
+        // Night Light Map (LN)
+        NightLightMap nightLightMap;
+        if (!nightLightMap.deserialize(originalFileData)) {
+            Log(ERROR, "BMP", "Failed to deserialize night light map: {}", resourceName_);
+            return false;
+        }
+        
+        Log(DEBUG, "BMP", "Night light map loaded: {}x{}", nightLightMap.width, nightLightMap.height);
+        
+        // Upscale the night light map
+        nightLightMap.upscale(upscaleFactor);
+        
+        Log(DEBUG, "BMP", "Night light map upscaled to: {}x{}", nightLightMap.width, nightLightMap.height);
+        
+        // Serialize the upscaled night light map
+        std::vector<uint8_t> upscaledData = nightLightMap.serialize();
+        
+        // Save to upscale directory
+        std::string upscalePath = getUpscaledDir(true) + "/" + resourceName_ + originalExtension;
+        std::ofstream outputFile(upscalePath, std::ios::binary);
+        if (!outputFile.is_open()) {
+            Log(ERROR, "BMP", "Failed to create upscaled file: {}", upscalePath);
+            return false;
+        }
+        
+        outputFile.write(reinterpret_cast<const char*>(upscaledData.data()), upscaledData.size());
+        
+        if (outputFile.fail()) {
+            Log(ERROR, "BMP", "Failed to write upscaled night light map: {}", upscalePath);
+            return false;
+        }
+        
+        Log(DEBUG, "BMP", "Successfully upscaled night light map: {} bytes -> {}", upscaledData.size(), upscalePath);
         return true;
         
     } else if (resourceUpper.find("HT") != std::string::npos) {
