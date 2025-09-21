@@ -65,7 +65,7 @@ bool BMP::upscale() {
             std::transform(baseName.begin(), baseName.end(), baseName.begin(), ::toupper);
             std::string largeVersion = baseName + "L";
             
-            Log(MESSAGE, "BMP", "Multi-resolution {} version detected, upscaling L version instead: {} -> {}", 
+            Log(MESSAGE, "BMP", "Multi-resolution {} version detected, resizing L version: {} -> {}", 
                 suffix, resourceName_, largeVersion);
             
             // Create a BMP instance for the L version and upscale it
@@ -91,18 +91,50 @@ bool BMP::upscale() {
             }
             
             if (success) {
-                // Copy the upscaled L version to the current M/S version's directory
+                // Resize the upscaled L version to originalSize * upscaleFactor for M/S versions
                 std::string currentUpscaledDir = getUpscaledDir(true);
                 std::string currentUpscaledFile = currentUpscaledDir + "/" + resourceName_ + ".png";
                 
                 try {
-                    std::filesystem::copy_file(largeUpscaledFile, currentUpscaledFile, 
-                                             std::filesystem::copy_options::overwrite_existing);
+                    // Load the upscaled L version
+                    cv::Mat largeImage = cv::imread(largeUpscaledFile, cv::IMREAD_UNCHANGED);
+                    if (largeImage.empty()) {
+                        Log(ERROR, "BMP", "Failed to load upscaled L version: {}", largeUpscaledFile);
+                        return false;
+                    }
                     
-                    Log(MESSAGE, "BMP", "Copied upscaled L version to {} version: {} -> {}", 
-                        suffix, largeUpscaledFile, currentUpscaledFile);
-                } catch (const std::filesystem::filesystem_error& e) {
-                    Log(ERROR, "BMP", "Failed to copy upscaled L version to {} version: {}", suffix, e.what());
+                    // Calculate the target size: originalSize * upscaleFactor
+                    uint32_t upscaleFactor = PIE4K_CFG.UpScaleFactor;
+                    
+                    // Get the original size of the current M/S version
+                    cv::Mat originalImage = cv::imread(getExtractDir() + "/" + resourceName_ + ".png", cv::IMREAD_UNCHANGED);
+                    if (originalImage.empty()) {
+                        Log(ERROR, "BMP", "Failed to load original {} version for size reference: {}", suffix, resourceName_);
+                        return false;
+                    }
+                    
+                    // Calculate target size: originalSize * upscaleFactor
+                    int targetWidth = originalImage.cols * upscaleFactor;
+                    int targetHeight = originalImage.rows * upscaleFactor;
+                    
+                    Log(DEBUG, "BMP", "Resizing {} version: {}x{} -> {}x{} (factor: {})", 
+                        suffix, largeImage.cols, largeImage.rows, targetWidth, targetHeight, upscaleFactor);
+                    
+                    // Resize the L version to the target size
+                    cv::Mat resizedImage;
+                    cv::resize(largeImage, resizedImage, cv::Size(targetWidth, targetHeight), 0, 0, cv::INTER_LANCZOS4);
+                    
+                    // Save the resized image
+                    if (!cv::imwrite(currentUpscaledFile, resizedImage)) {
+                        Log(ERROR, "BMP", "Failed to save resized {} version: {}", suffix, currentUpscaledFile);
+                        return false;
+                    }
+                    
+                    Log(MESSAGE, "BMP", "Successfully resized L version to {} version: {} -> {} ({}x{})", 
+                        suffix, largeUpscaledFile, currentUpscaledFile, targetWidth, targetHeight);
+                        
+                } catch (const std::exception& e) {
+                    Log(ERROR, "BMP", "Failed to resize L version to {} version: {}", suffix, e.what());
                     success = false;
                 }
             }
