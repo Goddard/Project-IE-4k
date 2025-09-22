@@ -32,8 +32,7 @@ TIS::TIS(const std::string& resourceName_)
     }
     
     // Load WED file for tile information using our Resource Service
-    // For night variants (e.g., AR1900N.TIS), use the base resource name (AR1900) for WED
-    std::string baseResourceName = getBaseResourceName();
+    std::string baseResourceName = extractBaseName();
     std::vector<uint8_t> wedData = loadResourceFromService(baseResourceName, IE_WED_CLASS_ID);
     if (!wedData.empty()) {
         // Store the WED data directly
@@ -143,7 +142,7 @@ bool TIS::parseWEDFile() {
         std::transform(resourceName_Upper.begin(), resourceName_Upper.end(), resourceName_Upper.begin(), ::toupper);
         
         // For night variants, compare against the base resource name
-        std::string baseResourceName = getBaseResourceName();
+        std::string baseResourceName = extractBaseName();
         std::string baseResourceName_Upper = baseResourceName;
         std::transform(baseResourceName_Upper.begin(), baseResourceName_Upper.end(), baseResourceName_Upper.begin(), ::toupper);
         
@@ -1154,7 +1153,7 @@ bool TIS::convertPngToTisV1Palette() {
                 return false;
             }
             TISHeader header;
-            header.setTileCount(static_cast<uint32_t>(primaryTileCountPlanned + secondaryTileCountPlanned));
+            header.setTileCount(0);
             header.tileSize = 5120;
             outFile.write(reinterpret_cast<const char*>(&header), sizeof(TISHeader));
 
@@ -1253,12 +1252,20 @@ bool TIS::convertPngToTisV1Palette() {
         }
     }
 
-    if (outFile.is_open()) outFile.close();
+    // Update header with actual tile count
+    if (outFile.is_open()) {
+        outFile.seekp(0); // Go back to beginning
+        TISHeader header;
+        header.tileSize = 5120;
+        header.setTileCount(static_cast<uint32_t>(tilesWritten));
+        outFile.write(reinterpret_cast<const char*>(&header), sizeof(TISHeader));
+        outFile.close();
+    }
 
     Log(DEBUG, "TIS", "Successfully created TIS V1 (palette-based) file: {}", outputFile);
-    Log(DEBUG, "TIS", "Created {} palette-based tiles (expected {})", tilesWritten, static_cast<uint64_t>(primaryTileCountPlanned + secondaryTileCountPlanned));
+    Log(DEBUG, "TIS", "Created {} palette-based tiles", tilesWritten);
     
-    return tilesWritten == static_cast<uint64_t>(primaryTileCountPlanned + secondaryTileCountPlanned);
+    return true;
 }
 
 // Batch operations (implemented by PluginManager)
@@ -1321,19 +1328,6 @@ bool TIS::cleanAssembleDirectory() {
         }
     }
     return true; // Directory doesn't exist, nothing to clean
-}
-
-std::string TIS::getBaseResourceName() const {
-    // Handle night variants (e.g., AR1900N.TIS -> AR1900)
-    // Check if the resource name ends with 'N' (night variant)
-    if (resourceName_.length() > 1 && resourceName_.back() == 'N') {
-        std::string baseName = resourceName_.substr(0, resourceName_.length() - 1);
-        Log(DEBUG, "TIS", "Night variant detected: '{}' -> base name: '{}'", resourceName_, baseName);
-        return baseName;
-    }
-    
-    // Not a night variant, return the original name
-    return resourceName_;
 }
 
 // Path management - TIS-specific paths

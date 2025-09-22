@@ -101,9 +101,6 @@ private:
     bool parseWEDFile();
     bool extractAdditionalPVRZFiles();
     
-    // Helper method for night variants
-    std::string getBaseResourceName() const;
-    
     // Utility methods
     bool cleanDirectory(const std::string& dir);
 };
