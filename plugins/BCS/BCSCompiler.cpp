@@ -702,6 +702,12 @@ std::vector<std::string> BCSCompiler::splitParameters(const std::string& paramSt
 bool BCSCompiler::parseObjectFromText(const std::string& text, BCSObject& object) {
     object = BCSObject();
     
+    // Check if text is empty
+    if (text.empty()) {
+        Log(WARNING, "BCS", "parseObjectFromText called with empty string");
+        return false;
+    }
+    
     // Handle special object identifiers
     if (text == "Myself") {
         setIdentifierValue(object, 0, 1); // OBJECT.IDS: 1 = Myself

@@ -156,15 +156,15 @@ public:
     void cleanupSharedResources() override;
     bool hasSharedResources() const override { return true; }
 
+    /** Load all available IDS files dynamically */
+    bool loadIDSFiles();
+
 private:
     std::vector<BCSBlock> blocks;
 
     // Near Infinity-style decompiler
     std::unique_ptr<BcsDecompiler> decompiler_;
     std::unique_ptr<BCSCompiler> compiler_;
-    
-    /** Load all available IDS files dynamically */
-    bool loadIDSFiles();
 
     // Parsing methods
     bool parseScript();
