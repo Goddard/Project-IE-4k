@@ -116,6 +116,29 @@ bool TwoDA::upscale() {
 		}
 	}
 
+	// Special-case: XL3000.2da – scale LOCX and LOCY coordinates
+	{
+		std::string lowerName = originalFileName; for (auto &c : lowerName) c = static_cast<char>(std::tolower((unsigned char)c));
+		if (lowerName == "xnewarea.2da") {
+			int locxIdx = table.getColumnIndex("LOCX");
+			int locyIdx = table.getColumnIndex("LOCY");
+			
+			if (locxIdx != TwoDATable::npos) {
+				Log(DEBUG, "2DA", "Upscaling LOCX column by factor {}", ups);
+				table.scaleIntegerColumnBy(locxIdx, ups);
+			}
+			
+			if (locyIdx != TwoDATable::npos) {
+				Log(DEBUG, "2DA", "Upscaling LOCY column by factor {}", ups);
+				table.scaleIntegerColumnBy(locyIdx, ups);
+			}
+			
+			if (locxIdx != TwoDATable::npos || locyIdx != TwoDATable::npos) {
+				Log(MESSAGE, "2DA", "Upscaled XL3000.2da coordinates by factor {}", ups);
+			}
+		}
+	}
+
 	std::string outText = table.serializeToText();
 	std::ofstream out(dstPath);
 	if (!out.is_open()) return false;

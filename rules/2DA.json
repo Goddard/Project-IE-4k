@@ -1,5 +1,6 @@
 {
 "rules": [
-    { "operations": ["extract","upscale","assemble","transfer"], "include": ["START*.2DA"], "exclude": [] }
+    { "operations": ["extract","upscale","assemble","transfer"], "include": ["START*.2DA"], "exclude": [] },
+    { "operations": ["extract","upscale","assemble","transfer"], "include": ["XNEWAREA.2DA"], "exclude": [] }
   ]
 }
