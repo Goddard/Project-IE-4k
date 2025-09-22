@@ -420,7 +420,7 @@ bool DLG::hasCoordinates(const std::string& scriptString) {
                 size_t dotPos = coordStr.find('.');
                 std::stoi(coordStr.substr(0, dotPos));
                 std::stoi(coordStr.substr(dotPos + 1));
-                Log(DEBUG, "DLG", "Found coordinate pattern: [{}] in script: {}", coordStr, scriptString.substr(0, std::min(50UL, scriptString.length())));
+                Log(DEBUG, "DLG", "Found coordinate pattern: [{}] in script: {}", coordStr, scriptString.substr(0, std::min(static_cast<size_t>(50), scriptString.length())));
                 return true;
             } catch (const std::exception&) {
                 // Not a valid coordinate, continue searching
@@ -455,7 +455,7 @@ std::string DLG::stripComments(const std::string& scriptString) {
         
         // Skip comment lines (starting with //)
         if (line.length() >= 2 && line.substr(0, 2) == "//") {
-            Log(DEBUG, "DLG", "Skipping comment line: {}", line.substr(0, std::min(50UL, line.length())));
+            Log(DEBUG, "DLG", "Skipping comment line: {}", line.substr(0, std::min(static_cast<size_t>(50), line.length())));
             continue;
         }
         
@@ -468,7 +468,7 @@ std::string DLG::stripComments(const std::string& scriptString) {
 
 void DLG::upscaleScriptString(std::string& scriptString, int upscaleFactor) {
     Log(DEBUG, "DLG", "Processing script string (length: {}): {}", 
-        scriptString.length(), scriptString.substr(0, std::min(50UL, scriptString.length())));
+        scriptString.length(), scriptString.substr(0, std::min(static_cast<size_t>(50), scriptString.length())));
         
     if (scriptString.empty()) {
         Log(DEBUG, "DLG", "Script string is empty, skipping");
@@ -485,12 +485,12 @@ void DLG::upscaleScriptString(std::string& scriptString, int upscaleFactor) {
     // Check if the cleaned script contains coordinates before attempting BCS compilation
     if (!hasCoordinates(cleanedScript)) {
         Log(DEBUG, "DLG", "Script contains no coordinates, skipping BCS processing: {}", 
-            cleanedScript.substr(0, std::min(50UL, cleanedScript.length())));
+            cleanedScript.substr(0, std::min(static_cast<size_t>(50), cleanedScript.length())));
         return;
     }
 
     Log(DEBUG, "DLG", "Upscaling script string using BCS compiler/decompiler: {}", 
-        cleanedScript.substr(0, std::min(50UL, cleanedScript.length())));
+        cleanedScript.substr(0, std::min(static_cast<size_t>(50), cleanedScript.length())));
 
     // Ensure compiler and decompiler are initialized
     if (!ensureCompilerInitialized()) {
@@ -542,8 +542,8 @@ void DLG::upscaleScriptString(std::string& scriptString, int upscaleFactor) {
         std::vector<BCSBlock> blocks;
         try {
             if (!compiler_->compileText(wrappedScript, blocks)) {
-                Log(WARNING, "DLG", "Failed to compile wrapped script string, skipping upscaling: {}", 
-                    scriptString.substr(0, std::min(50UL, scriptString.length())));
+            Log(WARNING, "DLG", "Failed to compile wrapped script string, skipping upscaling: {}", 
+                scriptString.substr(0, std::min(static_cast<size_t>(50), scriptString.length())));
                 return;
             }
         } catch (const std::exception& e) {
