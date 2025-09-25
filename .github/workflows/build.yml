@@ -1,6 +1,8 @@
 name: Build PIE4K
 on:
   push:
+    tags:
+      - 'v*'  # Triggers on version tags like v1.0.0, v2.1.3, etc.
   pull_request:
 
 concurrency:
@@ -8,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write  # Changed to write to allow creating releases
 
 jobs:
   build-linux:
@@ -109,4 +111,63 @@ jobs:
           name: PIE4K-windows
           path: PIE4K-windows/
 
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: PIE4K-linux
+          path: ./linux-build
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: PIE4K-windows
+          path: ./windows-build
+
+      - name: Create Linux archive
+        run: |
+          cd linux-build
+          tar -czf ../PIE4K-linux.tar.gz .
+
+      - name: Create Windows archive
+        run: |
+          cd windows-build
+          zip -r ../PIE4K-windows.zip .
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: PIE4K ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## PIE4K ${{ steps.version.outputs.VERSION }}
+            
+            ### Downloads
+            - **Linux**: PIE4K-linux.tar.gz
+            - **Windows**: PIE4K-windows.zip
+            
+            ### Installation
+            1. Extract the archive for your platform
+            2. Run the executable
+            
+            ### Changes
+            See the commit history for detailed changes.
+          files: |
+            PIE4K-linux.tar.gz
+            PIE4K-windows.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
